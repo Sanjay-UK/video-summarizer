@@ -1,0 +1,15 @@
+# Generated video processing artifacts
+output/
+downloads/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# OS
+.DS_Store
+
+# Logs
+*.log

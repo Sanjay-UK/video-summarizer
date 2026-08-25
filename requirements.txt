@@ -1,0 +1,7 @@
+faster-whisper>=1.0.0
+pydub>=0.25.1
+ollama>=0.6.0
+yt-dlp>=2025.10.14
+flask>=2.3.0
+edge-tts>=6.1.0
+gtts>=2.3.0
