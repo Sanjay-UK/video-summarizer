@@ -136,6 +136,6 @@ which ffmpeg
 - Add domain-specific terms to terms.json
 
 ## Status
-✅ **Week 1 (Foundation)**: Downloader, audio extractor, transcriber  
-🚧 **Week 2 (Summarization)**: Ollama integration, text summarization  
-⏳ **Week 3 (Output)**: Subtitles, TTS, CLI integration
+✅ **Week 1 (Foundation)**: File upload, audio extractor, transcriber  
+✅ **Week 2 (Summarization)**: Ollama integration, text summarization, web UI  
+🚧 **Week 3 (Next phase)**: YouTube download, TTS audio, subtitles, job history

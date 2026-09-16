@@ -26,25 +26,9 @@
  <div class="content-wrapper">
  <div class="input-card">
  <h1>Summarize Any Video</h1>
- <p class="subtitle">Paste a YouTube link and get an intelligent summary in minutes</p>
+ <p class="subtitle">Upload a video file and get an intelligent summary in minutes</p>
 
  <div class="input-group">
- <div class="input-tabs">
- <button class="tab-btn active" onclick="switchTab('url')">YouTube URL</button>
- <button class="tab-btn" onclick="switchTab('upload')">Upload Video</button>
- </div>
-
- <div id="url-tab" class="tab-content active">
- <input
- type="text"
- id="youtubeUrl"
- placeholder="https://www.youtube.com/watch?v=..."
- class="input-field"
- autofocus
- >
- </div>
-
- <div id="upload-tab" class="tab-content">
  <div class="file-upload">
  <input
  type="file"
@@ -67,54 +51,10 @@
  </div>
  </div>
  </div>
- </div>
-
- <div class="settings">
- <label>Summarization Model</label>
- <div class="model-selector">
- <label class="radio-option">
- <input type="radio" name="model" value="llama3.2:3b" checked>
- <span class="option-label">Llama 3.2</span>
- <span class="option-desc">Fast & reliable</span>
- </label>
- <label class="radio-option">
- <input type="radio" name="model" value="qwen2.5:7b-instruct">
- <span class="option-label">Qwen 2.5</span>
- <span class="option-desc">Better quality</span>
- </label>
- </div>
-
- <label style="margin-top: 20px;">Analysis Depth</label>
- <div class="compression-selector">
- <label class="radio-option">
- <input type="radio" name="compression" value="high" checked>
- <span class="option-label">Quick Summary</span>
- <span class="option-desc">Key points only</span>
- </label>
- <label class="radio-option">
- <input type="radio" name="compression" value="medium">
- <span class="option-label">Balanced</span>
- <span class="option-desc">Main points + details</span>
- </label>
- <label class="radio-option">
- <input type="radio" name="compression" value="low">
- <span class="option-label">Comprehensive</span>
- <span class="option-desc">Deep analysis</span>
- </label>
- </div>
- </div>
 
  <button id="summarizeBtn" class="btn btn-primary" onclick="startSummarization()">
  Summarize Video
  </button>
-
- <!-- History Section -->
- <div class="history-section" id="historySection" style="margin-top: 40px;">
- <h3>Processing History</h3>
- <div class="history-list" id="historyList">
- <div class="history-empty">No videos processed yet</div>
- </div>
- </div>
  </div>
  </div>
  </section>
@@ -142,9 +82,9 @@
 
  <!-- Subtasks -->
  <div class="subtasks">
- <div class="subtask" id="subtask-download">
+ <div class="subtask" id="subtask-loading">
  <span class="subtask-checkbox"></span>
- <span class="subtask-name"> Download Video</span>
+ <span class="subtask-name"> Load Video</span>
  </div>
  <div class="subtask" id="subtask-audio">
  <span class="subtask-checkbox"></span>
@@ -158,21 +98,6 @@
  <span class="subtask-checkbox"></span>
  <span class="subtask-name"> Summarize</span>
  </div>
- <div class="subtask" id="subtask-audio-gen">
- <span class="subtask-checkbox"></span>
- <span class="subtask-name"> Generate Audio</span>
- </div>
- <div class="subtask" id="subtask-subtitles">
- <span class="subtask-checkbox"></span>
- <span class="subtask-name"> Generate Subtitles</span>
- </div>
- </div>
-
- <!-- Logs -->
- <div class="log-viewer">
- <div class="log-content" id="logContent">
- <div class="log-entry">Initializing...</div>
- </div>
  </div>
  </div>
  </div>
@@ -182,22 +107,6 @@
  <section class="results-section" id="resultsSection" style="display: none;">
  <div class="content-wrapper">
  <button class="btn btn-back" onclick="goToDashboard()" title="Back to Dashboard" style="margin-bottom: 20px;">Back</button>
- <div class="job-id-display" id="jobIdDisplay" style="margin-bottom: 16px; color: #888; font-size: 13px;"></div>
- <!-- Stats -->
- <div class="stats-grid">
- <div class="stat-card">
- <div class="stat-number" id="originalLength"></div>
- <div class="stat-label">Original Length</div>
- </div>
- <div class="stat-card">
- <div class="stat-number" id="summaryLength"></div>
- <div class="stat-label">Summary Length</div>
- </div>
- <div class="stat-card">
- <div class="stat-number" id="compression"></div>
- <div class="stat-label">Compression</div>
- </div>
- </div>
 
  <!-- Summary -->
  <div class="result-card">
@@ -207,31 +116,6 @@
  Download Text
  </button>
  </div>
-
- <!-- Audio -->
- <div class="result-card">
- <h2>Listen to Summary</h2>
- <audio controls class="audio-player" id="audioPlayer" controlsList="nodownload">
- <source id="audioSource" src="" type="audio/mpeg">
- Your browser does not support the audio element.
- </audio>
- <p style="color: #999; font-size: 13px; margin-top: 10px;">
- If audio doesn't play, use the "Download Audio" button below
- </p>
- <button class="btn btn-secondary" onclick="downloadAudio()">
- Download Audio
- </button>
- </div>
-
- <!-- Subtitles -->
- <div class="result-card">
- <h2>Video Subtitles</h2>
- <p>Import into any video editor or player</p>
- <button class="btn btn-secondary" onclick="downloadSubtitles()">
- Download SRT File
- </button>
- </div>
-
  </div>
  </section>
 
