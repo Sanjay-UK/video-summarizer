@@ -104,7 +104,31 @@ On first run, the app auto-creates two local folders (already excluded from git 
 For quick one-off summarization without the web interface:
 ```bash
 python3 main.py "https://www.youtube.com/watch?v=VIDEO_ID" --quality 360
+python3 main.py "https://www.youtube.com/watch?v=VIDEO_ID" --highlight-video --model llama3.2:3b
 ```
+
+### Highlight video (optional)
+
+- Burned-in captions need **FFmpeg with libass** (`subtitles` filter). The app checks for this at startup (warning only) and **fails with instructions** when you run a highlight job without it.
+- **Resolution order:** `FFMPEG_PATH` environment variable → `ffmpeg` on `PATH` → common install locations (Homebrew on macOS).
+- **macOS:** `brew install ffmpeg-full`, then either add `/opt/homebrew/opt/ffmpeg-full/bin` to `PATH` or:
+  ```bash
+  export FFMPEG_PATH=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg
+  ```
+- **Windows (demo machine):** Install a **full** build that includes libass, for example:
+  - [Gyan.dev FFmpeg builds](https://www.gyan.dev/ffmpeg/builds/) — download **ffmpeg-release-full** (not the minimal *essentials* zip), unpack to e.g. `C:\ffmpeg`, then:
+  ```cmd
+  set FFMPEG_PATH=C:\ffmpeg\bin\ffmpeg.exe
+  ```
+  Or add `C:\ffmpeg\bin` to your user **Path** and restart the terminal.
+  Verify:
+  ```cmd
+  ffmpeg -filters 2>&1 | findstr subtitles
+  ```
+  You should see a line containing `subtitles`. Paths with drive letters (`C:\...`) are escaped automatically for the subtitle burn-in filter.
+- **Linux:** `sudo apt install ffmpeg` (ensure libass is included) or use a distro package named `ffmpeg` with subtitles support.
+- Edge TTS **7.3+** recommended for word-boundary captions: `pip install -U 'edge-tts>=7.3.1'`. Check: `python3 scripts/check_edge_tts_boundaries.py`
+- Each job stores a **copy** of the source file as `output/<job_id>/source.mp4` (upload and YouTube paths).
 
 ## Troubleshooting
 
