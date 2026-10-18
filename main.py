@@ -4,9 +4,11 @@ Main CLI for automatic video summarization pipeline.
 
 Usage:
  python3 main.py "https://youtube.com/watch?v=..." [--quality 360]
+ python3 main.py "https://..." --highlight-video
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -15,13 +17,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import DOWNLOADS_DIR, OUTPUT_DIR
 from src.audio_extractor import extract_audio
 from src.downloader import download_youtube_video
+from src.highlight_ffmpeg import require_ffmpeg_subtitles_filter
+from src.highlight_pipeline import run_highlight_pipeline
+from src.job_video import copy_source_video_to_job
 from src.subtitle_generator import generate_subtitles
 from src.summarizer import summarize_transcript, test_ollama
 from src.transcriber import transcribe_audio
 from src.tts_generator import generate_audio_explanation
 
 
-def run_full_pipeline(url: str, quality: int = 360, model: str = "llama2") -> dict:
+def run_full_pipeline(
+    url: str,
+    quality: int = 360,
+    model: str = "llama2",
+    *,
+    highlight_video: bool = False,
+) -> dict:
     """Run the complete video summarization pipeline."""
     print("=" * 70)
     print("AUTOMATIC VIDEO SUMMARIZATION PIPELINE")
@@ -39,6 +50,9 @@ def run_full_pipeline(url: str, quality: int = 360, model: str = "llama2") -> di
         video_path = download_youtube_video(url, DOWNLOADS_DIR, quality=quality)
         outputs["video"] = video_path
         print()
+
+        staged = copy_source_video_to_job(video_path, OUTPUT_DIR)
+        outputs["job_source_video"] = staged
 
         print("Step 2: Extract audio...")
         audio_path = extract_audio(video_path, OUTPUT_DIR)
@@ -95,6 +109,23 @@ def run_full_pipeline(url: str, quality: int = 360, model: str = "llama2") -> di
         print(f" Week 3 partial: {e}")
         print(" (Subtitles and audio may not have been generated)")
 
+    if highlight_video:
+        print("[HIGHLIGHT] Generating highlight_en.mp4...")
+        try:
+            require_ffmpeg_subtitles_filter()
+            with open(OUTPUT_DIR / "segments.json", encoding="utf-8") as f:
+                segments = json.load(f)
+            highlight_path = run_highlight_pipeline(
+                staged,
+                segments,
+                OUTPUT_DIR,
+                model=model,
+            )
+            outputs["highlight_en"] = highlight_path
+            print(f"[DONE] Highlight: {highlight_path}")
+        except Exception as e:
+            print(f"[WARN] Highlight generation failed: {e}")
+
     print("=" * 70)
     print(" PIPELINE COMPLETE")
     print("=" * 70)
@@ -136,7 +167,7 @@ def main():
         epilog="""
 Examples:
  python3 main.py "https://www.youtube.com/watch?v=fWjsdhR3z3c"
- python3 main.py "https://..." --quality 720 --model llama3.1
+ python3 main.py "https://..." --highlight-video --model llama3.2:3b
  python3 main.py --test-ollama
 """,
     )
@@ -144,6 +175,11 @@ Examples:
     parser.add_argument("--quality", "-q", type=int, default=360)
     parser.add_argument("--model", "-m", default="llama2")
     parser.add_argument("--test-ollama", action="store_true")
+    parser.add_argument(
+        "--highlight-video",
+        action="store_true",
+        help="Also generate output/.../highlights/en/highlight_en.mp4",
+    )
 
     args = parser.parse_args()
 
@@ -160,7 +196,12 @@ Examples:
         sys.exit(1)
 
     try:
-        outputs = run_full_pipeline(args.url, quality=args.quality, model=args.model)
+        outputs = run_full_pipeline(
+            args.url,
+            quality=args.quality,
+            model=args.model,
+            highlight_video=args.highlight_video,
+        )
         if outputs:
             print("\n All steps completed successfully!")
             sys.exit(0)
