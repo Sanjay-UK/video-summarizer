@@ -21,6 +21,9 @@ from src.summarizer import summarize_transcript
 from src.subtitle_generator import generate_subtitles
 from src.tts_generator import generate_audio_explanation
 from config import OUTPUT_DIR, DOWNLOADS_DIR
+from src.job_video import copy_source_video_to_job
+from src.highlight_ffmpeg import log_ffmpeg_subtitles_status_on_startup
+from src.highlight_pipeline import run_highlight_pipeline
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
@@ -99,11 +102,18 @@ class JobProgress:
             "log_lines": self.log_lines[-20:],
         }
 
-def process_video(job_id, source, model="llama3.2:3b", compression="medium"):
+def process_video(
+    job_id,
+    source,
+    model="llama3.2:3b",
+    compression="medium",
+    highlight_video: bool = False,
+):
     """Run complete pipeline in background.
 
     Args:
         compression: "high" (50%), "medium" (70%), or "low" (85%) compression
+        highlight_video: when True, also produce highlights/en/highlight_en.mp4
     """
     job = jobs[job_id]
 
@@ -134,6 +144,8 @@ def process_video(job_id, source, model="llama3.2:3b", compression="medium"):
 
         job.set_step("downloading", 0.10)
         job.add_log(f"Video ready: {video_path.name}")
+        staged_video = copy_source_video_to_job(video_path, job.job_output_dir)
+        job.add_log(f"Staged copy in job dir: {staged_video.name}")
 
         job.set_step("extracting_audio", 0.15)
         job.add_log("Extracting audio from video...")
@@ -159,6 +171,8 @@ def process_video(job_id, source, model="llama3.2:3b", compression="medium"):
         )
         job.set_step("summarizing", 0.85)
         job.add_log("Summarization complete")
+
+        highlight_path = None
 
         job.set_step("generating_audio", 0.90)
         job.add_log("Generating audio explanation with hierarchy...")
@@ -188,11 +202,31 @@ def process_video(job_id, source, model="llama3.2:3b", compression="medium"):
             )
             job.add_log("Subtitles generated from audio text")
 
-            job.set_step("generating_subtitles", 1.0)
+            job.set_step("generating_subtitles", 0.98)
         except Exception as e:
             job.add_log(f"Audio/subtitle generation failed: {str(e)}")
-            # Ensure the UI still reflects that the pipeline reached its final step,
-            # even if audio/subtitle generation failed partway through.
+            job.set_step("generating_subtitles", 0.98)
+
+        if highlight_video:
+            job.set_step("highlight_topics", 0.92)
+            job.add_log("Selecting topics for highlight video...")
+            try:
+                with open(job.job_output_dir / "segments.json", encoding="utf-8") as f:
+                    segments = json.load(f)
+                job.set_step("highlight_visuals", 0.94)
+                job.add_log("Extracting scene visuals and narration...")
+                job.set_step("highlight_assembly", 0.97)
+                highlight_path = run_highlight_pipeline(
+                    staged_video,
+                    segments,
+                    job.job_output_dir,
+                    model=model,
+                )
+                job.add_log(f"Highlight video ready: {highlight_path.name}")
+            except Exception as e:
+                job.add_log(f"Highlight video failed: {e}")
+            job.set_step("highlight_complete", 1.0)
+        else:
             job.set_step("generating_subtitles", 1.0)
 
         job.add_log("Pipeline completed successfully!")
@@ -208,6 +242,7 @@ def process_video(job_id, source, model="llama3.2:3b", compression="medium"):
             "summary": summary_text,
             "transcript_length": len(transcription.get("text", "")),
             "summary_length": len(summary_text),
+            "highlight_video": highlight_path is not None,
         }
 
         job.results = results
@@ -281,6 +316,7 @@ def summarize():
         url = request.form.get("url", "").strip()
         model = request.form.get("model", "llama3.2:3b")
         compression = request.form.get("compression", "medium")
+        highlight_video = request.form.get("highlight_video", "").lower() in ("1", "true", "on", "yes")
         uploaded_file = request.files.get("file")
 
         source = None
@@ -317,7 +353,7 @@ def summarize():
 
         thread = threading.Thread(
             target=process_video,
-            args=(job_id, source, model, compression),
+            args=(job_id, source, model, compression, highlight_video),
             daemon=True
         )
         thread.start()
@@ -358,11 +394,13 @@ def results(job_id):
             summary_text = open(summary_path, "r").read()
             transcript_length = len(open(transcript_path, "r").read()) if transcript_path.exists() else 0
 
+            highlight_file = job_dir / "highlights" / "en" / "highlight_en.mp4"
             return jsonify({
                 "status": "completed",
                 "summary": summary_text,
                 "transcript_length": transcript_length,
-                "summary_length": len(summary_text)
+                "summary_length": len(summary_text),
+                "highlight_video": highlight_file.is_file(),
             }), 200
         except Exception as e:
             print(f"[ERROR] Failed to load old job {job_id}: {e}")
@@ -444,7 +482,30 @@ def download_audio(job_id):
         print(f"[ERROR] Download audio failed: {e}")
         return "File not found", 404
 
+@app.route("/download/highlight/<job_id>")
+def download_highlight(job_id):
+    """Download highlight_en.mp4 when highlight generation was requested."""
+    try:
+        job = jobs.get(job_id)
+        if job:
+            file_path = job.job_output_dir / "highlights" / "en" / "highlight_en.mp4"
+        else:
+            file_path = OUTPUT_DIR / job_id / "highlights" / "en" / "highlight_en.mp4"
+
+        if file_path.is_file():
+            return send_file(
+                file_path,
+                as_attachment=True,
+                download_name="highlight_en.mp4",
+                mimetype="video/mp4",
+            )
+        return "File not found", 404
+    except Exception as e:
+        print(f"[ERROR] Download highlight failed: {e}")
+        return "File not found", 404
+
 if __name__ == "__main__":
     print("Starting Video Summarization Web App...")
+    log_ffmpeg_subtitles_status_on_startup()
     print("Open: http://localhost:5000")
     app.run(debug=True, host="0.0.0.0", port=5000)

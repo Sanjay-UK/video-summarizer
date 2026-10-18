@@ -7,7 +7,11 @@ const SUBTASK_STEPS = {
  'transcribing': 65,
  'summarizing': 85,
  'generating_audio': 92,
- 'generating_subtitles': 100
+ 'generating_subtitles': 100,
+ 'highlight_topics': 94,
+ 'highlight_visuals': 97,
+ 'highlight_assembly': 99,
+ 'highlight_complete': 100
 };
 
 const SUBTASK_NAMES = {
@@ -16,8 +20,14 @@ const SUBTASK_NAMES = {
  'transcribing': 'transcribe',
  'summarizing': 'summarize',
  'generating_audio': 'audio-gen',
- 'generating_subtitles': 'subtitles'
+ 'generating_subtitles': 'subtitles',
+ 'highlight_topics': 'highlight',
+ 'highlight_visuals': 'highlight',
+ 'highlight_assembly': 'highlight',
+ 'highlight_complete': 'highlight'
 };
+
+let highlightRequested = false;
 
 let currentJobId = null;
 let progressPoller = null;
@@ -114,6 +124,7 @@ function initializeDragDrop() {
 async function startSummarization() {
  const model = document.querySelector('input[name="model"]:checked').value;
  const compression = document.querySelector('input[name="compression"]:checked').value;
+ highlightRequested = document.getElementById('highlightVideo')?.checked === true;
  let source = null;
 
  if (currentTab === 'url') {
@@ -146,6 +157,14 @@ async function startSummarization() {
  const formData = new FormData();
  formData.append('model', model);
  formData.append('compression', compression);
+ if (highlightRequested) {
+ formData.append('highlight_video', '1');
+ }
+
+ const highlightSubtask = document.getElementById('subtask-highlight');
+ if (highlightSubtask) {
+ highlightSubtask.style.display = highlightRequested ? 'flex' : 'none';
+ }
 
  if (currentTab === 'url') {
  formData.append('url', source);
@@ -324,6 +343,11 @@ async function showResults(data) {
  document.getElementById('originalLength').textContent = `${Math.round(origLength / 100) / 10}k chars`;
  document.getElementById('summaryLength').textContent = `${Math.round(summLength / 100) / 10}k chars`;
  document.getElementById('compression').textContent = `${compression}%`;
+
+ const highlightCard = document.getElementById('highlightResultCard');
+ if (highlightCard) {
+ highlightCard.style.display = results.highlight_video ? 'block' : 'none';
+ }
  } catch (error) {
  console.error('[RESULTS ERROR]', error);
  }
@@ -376,6 +400,12 @@ function downloadAudio() {
 function downloadSubtitles() {
  if (currentJobId) {
  window.location.href = `/download/subtitles/${currentJobId}`;
+ }
+}
+
+function downloadHighlight() {
+ if (currentJobId) {
+ window.location.href = `/download/highlight/${currentJobId}`;
  }
 }
 

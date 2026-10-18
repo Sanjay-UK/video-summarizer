@@ -102,6 +102,14 @@
  <span class="option-desc">Deep analysis</span>
  </label>
  </div>
+
+ <label class="checkbox-option" style="margin-top: 20px; display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
+ <input type="checkbox" id="highlightVideo" name="highlight_video" value="1">
+ <span>
+ <span class="option-label">Generate highlight video (English)</span>
+ <span class="option-desc" style="display: block;">Optional narrated MP4 with key scenes. Requires FFmpeg with subtitles support.</span>
+ </span>
+ </label>
  </div>
 
  <button id="summarizeBtn" class="btn btn-primary" onclick="startSummarization()">
@@ -166,6 +174,10 @@
  <span class="subtask-checkbox"></span>
  <span class="subtask-name"> Generate Subtitles</span>
  </div>
+ <div class="subtask subtask-highlight-only" id="subtask-highlight" style="display: none;">
+ <span class="subtask-checkbox"></span>
+ <span class="subtask-name"> Build Highlight Video</span>
+ </div>
  </div>
 
  <!-- Logs -->
@@ -229,6 +241,15 @@
  <p>Import into any video editor or player</p>
  <button class="btn btn-secondary" onclick="downloadSubtitles()">
  Download SRT File
+ </button>
+ </div>
+
+ <!-- Highlight video (optional) -->
+ <div class="result-card" id="highlightResultCard" style="display: none;">
+ <h2>Highlight Video</h2>
+ <p>Narrated summary with key scenes (highlight_en.mp4)</p>
+ <button class="btn btn-secondary" onclick="downloadHighlight()">
+ Download Highlight MP4
  </button>
  </div>
 
