@@ -1,72 +1,201 @@
-"""End-to-end highlight video pipeline (English, opt-in)."""
+"""End-to-end highlight video pipeline (multi-language, opt-in)."""
 
 from __future__ import annotations
 
 import json
+import os
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
+from config import HIGHLIGHT_RENDER_MAX_PARALLEL_LANGS, HIGHLIGHT_TRANSLATOR
 from src.highlight_assembler import build_scene_video, concat_scenes
 from src.highlight_ffmpeg import require_ffmpeg_subtitles_filter
 from src.highlight_captions import build_scene_ass
+from src.highlight_jobs import (
+    merge_language_status,
+    read_highlight_status,
+    write_highlight_status,
+)
 from src.highlight_timing import scene_display_duration
+from src.highlight_translate import LanguageTranslationOutcome, translate_language_scenes
+from src.translators.google_circuit import (
+    GoogleJobCircuitBreaker,
+    reset_google_circuit_breaker,
+    set_google_circuit_breaker,
+)
 from src.highlight_tts import generate_scene_narration
 from src.job_video import copy_source_video_to_job, job_source_video_path
-from src.narration_rewrite import rewrite_for_speech
+from src.locales import get_locale, parse_language_list
+from src.narration_rewrite import max_narration_words, rewrite_for_speech
 from src.topic_segmentation import TopicScene, run_topic_segmentation, write_highlight_scenes
-from src.visual_extractor import extract_visuals_for_scenes, write_visual_manifest
+from src.translation import SceneTranslationResult
+from src.translation_cache import JobTranslationCache
+from src.translation_log import TranslationTermLog
+from src.visual_extractor import VisualSelection, extract_visuals_for_scenes, write_visual_manifest
 
 
 def resolve_job_video(video_path: Path, job_output_dir: Path) -> Path:
-    """Ensure source.mp4 exists in the job directory."""
     staged = job_source_video_path(job_output_dir)
     if staged.is_file():
         return staged
     return copy_source_video_to_job(video_path, job_output_dir)
 
 
-def run_highlight_pipeline(
-    video_path: Path,
+def _load_or_build_shared(
     segments: list[dict[str, Any]],
+    staged_video: Path,
     job_output_dir: Path,
     *,
-    model: Optional[str] = None,
-    max_scenes: int = 0,
-) -> Path:
-    require_ffmpeg_subtitles_filter()
+    model: Optional[str],
+    max_scenes: int,
+    compression: str,
+    rebuild: bool = False,
+) -> tuple[list[TopicScene], list[VisualSelection], list[str]]:
+    scenes_path = job_output_dir / "highlight_scenes.json"
+    visual_manifest_path = job_output_dir / "visual_manifest.json"
+    en_narr_path = job_output_dir / "highlights" / "_shared" / "english_narrations.json"
 
-    job_output_dir = Path(job_output_dir)
-    highlight_root = job_output_dir / "highlights" / "en"
-    highlight_root.mkdir(parents=True, exist_ok=True)
-
-    staged_video = resolve_job_video(Path(video_path), job_output_dir)
+    if (
+        not rebuild
+        and scenes_path.is_file()
+        and visual_manifest_path.is_file()
+        and en_narr_path.is_file()
+    ):
+        scenes_data = json.loads(scenes_path.read_text(encoding="utf-8"))
+        scene_list = scenes_data.get("scenes", [])
+        scenes = [
+            TopicScene(
+                segment_id=int(s["segment_id"]),
+                source_time=float(s["source_time"]),
+                topic_title=str(s.get("topic_title", "")),
+                summary_text=str(s["summary_text"]),
+            )
+            for s in scene_list
+        ]
+        if max_scenes > 0:
+            scenes = scenes[:max_scenes]
+        vis_data = json.loads(visual_manifest_path.read_text(encoding="utf-8"))
+        vis_list = vis_data.get("visuals", [])
+        visuals = [
+            VisualSelection(
+                scene_index=int(v["scene_index"]),
+                mode=v["mode"],
+                source_time=float(v.get("source_time", 0)),
+                visual_path=Path(v["visual_path"]),
+                sharpness_score=v.get("sharpness_score"),
+                motion_score=v.get("motion_score"),
+            )
+            for v in vis_list
+        ]
+        if max_scenes > 0:
+            visuals = visuals[:max_scenes]
+        en_payload = json.loads(en_narr_path.read_text(encoding="utf-8"))
+        english_texts = [str(x) for x in en_payload.get("texts", [])]
+        if len(english_texts) == len(scenes):
+            return scenes, visuals, english_texts
 
     scenes = run_topic_segmentation(segments, model=model)
     if max_scenes > 0:
         scenes = scenes[:max_scenes]
 
-    write_highlight_scenes(job_output_dir / "highlight_scenes.json", scenes)
+    write_highlight_scenes(scenes_path, scenes)
 
-    visuals = extract_visuals_for_scenes(
-        staged_video,
-        scenes,
-        job_output_dir,
+    visuals = extract_visuals_for_scenes(staged_video, scenes, job_output_dir)
+    write_visual_manifest(visual_manifest_path, visuals)
+
+    english_texts: list[str] = []
+    for scene in scenes:
+        spoken = rewrite_for_speech(
+            scene.summary_text,
+            scene.topic_title,
+            model=model,
+            compression=compression,
+        )
+        english_texts.append(spoken)
+
+    shared_dir = job_output_dir / "highlights" / "_shared"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    with open(en_narr_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "compression": compression,
+                "max_words_per_scene": max_narration_words(compression),
+                "texts": english_texts,
+                "topic_titles": [s.topic_title for s in scenes],
+            },
+            f,
+            indent=2,
+        )
+
+    return scenes, visuals, english_texts
+
+
+def _write_lang_failure(
+    job_output_dir: Path,
+    lang: str,
+    message: str,
+    *,
+    failure_kind: Optional[str],
+    translation_seconds: float = 0.0,
+    translator_backend: str = "",
+) -> None:
+    highlight_root = job_output_dir / "highlights" / lang
+    highlight_root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "language": lang,
+        "status": "failed",
+        "translator": translator_backend or HIGHLIGHT_TRANSLATOR,
+        "message": message,
+        "failure_kind": failure_kind,
+        "translation_seconds": round(translation_seconds, 3),
+    }
+    (highlight_root / "language_status.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
     )
-    write_visual_manifest(job_output_dir / "visual_manifest.json", visuals)
+    merge_language_status(job_output_dir, lang, payload)
 
+
+def _render_language_media(
+    lang: str,
+    scenes: list[TopicScene],
+    visuals: list[VisualSelection],
+    spoken_texts: list[str],
+    english_texts: list[str],
+    job_output_dir: Path,
+    *,
+    compression: str,
+    translation_seconds: float,
+    translator_backend: str,
+) -> Path:
+    locale = get_locale(lang)
+    highlight_root = job_output_dir / "highlights" / lang
+    highlight_root.mkdir(parents=True, exist_ok=True)
+
+    tts_start = time.perf_counter()
     scene_videos: list[Path] = []
     narration_manifest: list[dict[str, Any]] = []
 
-    for scene, visual in zip(scenes, visuals):
+    for scene, visual, spoken in zip(scenes, visuals, spoken_texts):
+        if not spoken:
+            continue
+
         scene_dir = highlight_root / f"scene_{visual.scene_index:03d}"
         scene_dir.mkdir(parents=True, exist_ok=True)
-
-        spoken = rewrite_for_speech(scene.summary_text, scene.topic_title, model=model)
         (scene_dir / "narration.txt").write_text(spoken, encoding="utf-8")
 
-        tts = generate_scene_narration(spoken, scene_dir / "narration.mp3")
+        tts = generate_scene_narration(spoken, scene_dir / "narration.mp3", locale=locale)
         display_sec = scene_display_duration(tts.duration_seconds)
-        ass_path = build_scene_ass(tts, display_sec, scene_dir / "captions.ass")
+        ass_path = build_scene_ass(
+            tts,
+            display_sec,
+            scene_dir / "captions.ass",
+            locale=locale,
+        )
 
         final_scene = build_scene_video(
             visual,
@@ -82,15 +211,238 @@ def run_highlight_pipeline(
                 "scene_index": visual.scene_index,
                 "topic_title": scene.topic_title,
                 "spoken_text": spoken,
+                "source_en": english_texts[visual.scene_index] if lang != "en" else spoken,
                 "tts_boundary_kind": tts.boundary_kind,
+                "tts_voice": tts.voice_used,
                 "narration_seconds": tts.duration_seconds,
                 "display_seconds": display_sec,
             }
         )
 
-    with open(highlight_root / "narration_manifest.json", "w", encoding="utf-8") as f:
-        json.dump({"scenes": narration_manifest}, f, indent=2)
+    tts_seconds = time.perf_counter() - tts_start
 
-    output_mp4 = highlight_root / "highlight_en.mp4"
+    if not scene_videos:
+        raise RuntimeError(f"No scenes rendered for language {lang}")
+
+    render_start = time.perf_counter()
+    with open(highlight_root / "narration_manifest.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "language": lang,
+                "compression": compression,
+                "max_words_per_scene_en": max_narration_words(compression),
+                "scenes": narration_manifest,
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    output_mp4 = highlight_root / f"highlight_{lang}.mp4"
     concat_scenes(scene_videos, output_mp4)
+    render_seconds = time.perf_counter() - render_start
+
+    total = translation_seconds + tts_seconds + render_seconds
+    success = {
+        "language": lang,
+        "status": "success",
+        "translator": translator_backend or ("source" if lang == "en" else HIGHLIGHT_TRANSLATOR),
+        "translation_seconds": round(translation_seconds, 3),
+        "tts_seconds": round(tts_seconds, 3),
+        "render_seconds": round(render_seconds, 3),
+        "total_seconds": round(total, 3),
+    }
+    (highlight_root / "language_status.json").write_text(
+        json.dumps(success, indent=2),
+        encoding="utf-8",
+    )
+    merge_language_status(job_output_dir, lang, success)
     return output_mp4
+
+
+def _save_translations_json(
+    lang: str,
+    job_output_dir: Path,
+    results: list[SceneTranslationResult],
+) -> None:
+    trans_path = job_output_dir / "highlights" / lang / "translations.json"
+    trans_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(trans_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "language": lang,
+                "translator": HIGHLIGHT_TRANSLATOR,
+                "scenes": [asdict(r) for r in results],
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+
+def run_highlight_pipeline(
+    video_path: Path,
+    segments: list[dict[str, Any]],
+    job_output_dir: Path,
+    *,
+    model: Optional[str] = None,
+    max_scenes: int = 0,
+    compression: str = "medium",
+    languages: Optional[list[str] | str] = None,
+    rebuild_shared: bool = False,
+) -> Union[Path, dict[str, Path]]:
+    require_ffmpeg_subtitles_filter()
+
+    job_output_dir = Path(job_output_dir)
+    lang_codes = parse_language_list(languages)
+    staged_video = resolve_job_video(Path(video_path), job_output_dir)
+
+    scenes, visuals, english_texts = _load_or_build_shared(
+        segments,
+        staged_video,
+        job_output_dir,
+        model=model,
+        max_scenes=max_scenes,
+        compression=compression,
+        rebuild=rebuild_shared,
+    )
+
+    shared_dir = job_output_dir / "highlights" / "_shared"
+    term_log = TranslationTermLog(job_output_dir / "highlights" / "translation_log.json")
+    trans_cache = JobTranslationCache(shared_dir / "translation_cache.json")
+
+    status = read_highlight_status(job_output_dir)
+    status["requested_languages"] = lang_codes
+    write_highlight_status(job_output_dir, status)
+
+    google_breaker = GoogleJobCircuitBreaker()
+    if os.environ.get("HIGHLIGHT_DISABLE_GOOGLE", "").strip().lower() in ("1", "true", "yes"):
+        google_breaker.trip("HIGHLIGHT_DISABLE_GOOGLE")
+    breaker_token = set_google_circuit_breaker(google_breaker)
+
+    # Phase 1: translate each language sequentially (backend chain per language)
+    translations: dict[str, LanguageTranslationOutcome] = {}
+    try:
+        for lang in lang_codes:
+            print(f"[INFO] Translating highlight language (sequential): {lang}", file=sys.stderr)
+            outcome = translate_language_scenes(
+                lang,
+                english_texts,
+                cache=trans_cache,
+                term_log=term_log,
+                google_circuit=google_breaker,
+            )
+            translations[lang] = outcome
+            if lang != "en" and outcome.scene_results:
+                _save_translations_json(lang, job_output_dir, outcome.scene_results)
+            if not outcome.ok:
+                msg = outcome.message or f"Translation failed for {lang}"
+                if outcome.failure_kind == "rate_limit":
+                    msg = f"Google rate limit — try again later. ({msg})"
+                _write_lang_failure(
+                    job_output_dir,
+                    lang,
+                    msg,
+                    failure_kind=outcome.failure_kind,
+                    translation_seconds=outcome.translation_seconds,
+                    translator_backend=outcome.translator_backend,
+                )
+                print(f"[WARN] Translation failed for {lang}: {msg}", file=sys.stderr)
+    finally:
+        reset_google_circuit_breaker(breaker_token)
+
+    # Phase 2: TTS + render in parallel (only languages with full spoken text)
+    render_queue: dict[str, list[str]] = {}
+    for lang, outcome in translations.items():
+        if outcome.ok and all(outcome.spoken_texts):
+            render_queue[lang] = [str(s) for s in outcome.spoken_texts]
+
+    results: dict[str, Path] = {}
+    errors: dict[str, str] = {}
+
+    workers = min(HIGHLIGHT_RENDER_MAX_PARALLEL_LANGS, max(len(render_queue), 1))
+    with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
+        futures = {
+            pool.submit(
+                _render_language_media,
+                lang,
+                scenes,
+                visuals,
+                spoken,
+                english_texts,
+                job_output_dir,
+                compression=compression,
+                translation_seconds=translations[lang].translation_seconds,
+                translator_backend=translations[lang].translator_backend,
+            ): lang
+            for lang, spoken in render_queue.items()
+        }
+        for fut in as_completed(futures):
+            lang = futures[fut]
+            try:
+                results[lang] = fut.result()
+                print(f"[INFO] Highlight {lang}: {results[lang]}", file=sys.stderr)
+            except Exception as exc:
+                errors[lang] = str(exc)
+                _write_lang_failure(
+                    job_output_dir,
+                    lang,
+                    str(exc),
+                    failure_kind="error",
+                    translation_seconds=translations[lang].translation_seconds,
+                    translator_backend=translations[lang].translator_backend,
+                )
+                print(f"[WARN] Highlight render {lang} failed: {exc}", file=sys.stderr)
+
+    if "en" in lang_codes and "en" not in results and len(lang_codes) == 1:
+        raise RuntimeError(errors.get("en", translations.get("en", LanguageTranslationOutcome("en", [])).message or "English highlight failed"))
+
+    if len(lang_codes) == 1 and lang_codes[0] == "en":
+        if "en" not in results:
+            raise RuntimeError(errors.get("en", "English highlight failed"))
+        return results["en"]
+
+    return results
+
+
+def retry_highlight_languages(
+    job_output_dir: Path,
+    languages: Optional[list[str]] = None,
+    *,
+    model: Optional[str] = None,
+    compression: Optional[str] = None,
+) -> dict[str, Path]:
+    """Re-translate and re-render failed languages; reuses shared visuals + cache."""
+    job_output_dir = Path(job_output_dir)
+    segments_path = job_output_dir / "segments.json"
+    video_path = job_output_dir / "source.mp4"
+    if not segments_path.is_file() or not video_path.is_file():
+        raise FileNotFoundError("Job missing segments.json or source.mp4 for retry")
+
+    if languages:
+        lang_codes = parse_language_list(languages)
+    else:
+        from src.highlight_jobs import failed_highlight_languages
+
+        lang_codes = failed_highlight_languages(job_output_dir)
+        if not lang_codes:
+            return {}
+
+    en_path = job_output_dir / "highlights" / "_shared" / "english_narrations.json"
+    comp = compression or "medium"
+    if en_path.is_file():
+        payload = json.loads(en_path.read_text(encoding="utf-8"))
+        comp = str(payload.get("compression", comp))
+
+    segments = json.loads(segments_path.read_text(encoding="utf-8"))
+    out = run_highlight_pipeline(
+        video_path,
+        segments,
+        job_output_dir,
+        model=model,
+        max_scenes=0,
+        compression=comp,
+        languages=lang_codes,
+        rebuild_shared=False,
+    )
+    return out if isinstance(out, dict) else {"en": out}

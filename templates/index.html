@@ -104,12 +104,36 @@
  </div>
 
  <label class="checkbox-option" style="margin-top: 20px; display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
- <input type="checkbox" id="highlightVideo" name="highlight_video" value="1">
+ <input type="checkbox" id="highlightVideo" name="highlight_video" value="1" onchange="toggleHighlightLangPanel()">
  <span>
- <span class="option-label">Generate highlight video (English)</span>
- <span class="option-desc" style="display: block;">Optional narrated MP4 with key scenes. Requires FFmpeg with subtitles support.</span>
+ <span class="option-label">Generate highlight video</span>
+ <span class="option-desc" style="display: block;">Optional narrated MP4 with key scenes. Requires FFmpeg with subtitles support. Translation uses Google Translate.</span>
  </span>
  </label>
+
+ <div id="highlightLangPanel" class="highlight-lang-panel" style="display: none; margin-top: 14px; padding-left: 28px;">
+ <p class="option-desc" style="margin-bottom: 10px;">Select languages. Each extra language adds render time.</p>
+ <label class="checkbox-option" style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+ <input type="checkbox" name="highlight_languages" value="en" checked>
+ <span class="option-label">English</span>
+ </label>
+ <label class="checkbox-option" style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+ <input type="checkbox" name="highlight_languages" value="hi">
+ <span class="option-label">Hindi</span>
+ </label>
+ <label class="checkbox-option" style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+ <input type="checkbox" name="highlight_languages" value="kn">
+ <span class="option-label">Kannada</span>
+ </label>
+ <label class="checkbox-option" style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+ <input type="checkbox" name="highlight_languages" value="te">
+ <span class="option-label">Telugu</span>
+ </label>
+ <label class="checkbox-option" style="display: flex; align-items: center; gap: 8px;">
+ <input type="checkbox" name="highlight_languages" value="ta">
+ <span class="option-label">Tamil</span>
+ </label>
+ </div>
  </div>
 
  <button id="summarizeBtn" class="btn btn-primary" onclick="startSummarization()">
@@ -211,27 +235,45 @@
  </div>
  </div>
 
- <!-- Summary -->
- <div class="result-card">
- <h2>Summary</h2>
- <div class="summary-text" id="summaryContent">Loading...</div>
- <button class="btn btn-secondary" onclick="downloadSummary()">
- Download Text
+ <!-- Highlight video (optional) -->
+ <div class="result-card" id="highlightResultCard" style="display: none;">
+ <h2>Highlight Video</h2>
+ <p id="highlightResultDesc">Narrated summary with key scenes</p>
+ <div id="highlightPlayerWrap" style="display: none; margin-bottom: 16px;">
+ <label for="highlightLangSelect" class="progress-label">Preview language</label>
+ <select id="highlightLangSelect" class="highlight-lang-select" onchange="onHighlightLangSelectChange()"></select>
+ <video id="highlightVideoPlayer" class="highlight-video-player" controls playsinline preload="metadata"></video>
+ </div>
+ <div id="highlightLangStatusList" class="highlight-lang-status"></div>
+ <div id="highlightDownloadList" style="display: none;" aria-hidden="true"></div>
+ <button type="button" class="btn btn-secondary" id="highlightRetryBtn" style="display: none; margin-top: 12px;" onclick="retryFailedHighlightLanguages()">
+ Retry failed languages
  </button>
  </div>
 
  <!-- Audio -->
- <div class="result-card">
+ <div class="result-card" id="listenResultCard">
  <h2>Listen to Summary</h2>
+ <label for="listenLangSelect" class="progress-label">Language</label>
+ <select id="listenLangSelect" class="highlight-lang-select" onchange="onListenLangSelectChange()"></select>
  <audio controls class="audio-player" id="audioPlayer" controlsList="nodownload">
  <source id="audioSource" src="" type="audio/mpeg">
  Your browser does not support the audio element.
  </audio>
  <p style="color: #999; font-size: 13px; margin-top: 10px;">
- If audio doesn't play, use the "Download Audio" button below
+ English uses the full summary audio. Other languages use the highlight narration track.
  </p>
- <button class="btn btn-secondary" onclick="downloadAudio()">
+ <button class="btn btn-secondary" onclick="downloadListenAudio()">
  Download Audio
+ </button>
+ </div>
+
+ <!-- Summary -->
+ <div class="result-card">
+ <h2>Comprehensive Summary</h2>
+ <div class="summary-text" id="summaryContent">Loading...</div>
+ <button class="btn btn-secondary" onclick="downloadSummary()">
+ Download Text
  </button>
  </div>
 
@@ -241,15 +283,6 @@
  <p>Import into any video editor or player</p>
  <button class="btn btn-secondary" onclick="downloadSubtitles()">
  Download SRT File
- </button>
- </div>
-
- <!-- Highlight video (optional) -->
- <div class="result-card" id="highlightResultCard" style="display: none;">
- <h2>Highlight Video</h2>
- <p>Narrated summary with key scenes (highlight_en.mp4)</p>
- <button class="btn btn-secondary" onclick="downloadHighlight()">
- Download Highlight MP4
  </button>
  </div>
 

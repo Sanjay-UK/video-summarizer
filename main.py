@@ -32,6 +32,8 @@ def run_full_pipeline(
     model: str = "llama2",
     *,
     highlight_video: bool = False,
+    compression: str = "medium",
+    highlight_languages: str = "en",
 ) -> dict:
     """Run the complete video summarization pipeline."""
     print("=" * 70)
@@ -77,6 +79,7 @@ def run_full_pipeline(
             segments_path=OUTPUT_DIR / "segments.json",
             output_dir=OUTPUT_DIR,
             model=model,
+            compression=compression,
         )
         outputs["summary"] = OUTPUT_DIR / "summary.txt"
         print()
@@ -115,14 +118,21 @@ def run_full_pipeline(
             require_ffmpeg_subtitles_filter()
             with open(OUTPUT_DIR / "segments.json", encoding="utf-8") as f:
                 segments = json.load(f)
-            highlight_path = run_highlight_pipeline(
+            highlight_out = run_highlight_pipeline(
                 staged,
                 segments,
                 OUTPUT_DIR,
                 model=model,
+                compression=compression,
+                languages=highlight_languages,
             )
-            outputs["highlight_en"] = highlight_path
-            print(f"[DONE] Highlight: {highlight_path}")
+            if isinstance(highlight_out, dict):
+                for lang, path in highlight_out.items():
+                    outputs[f"highlight_{lang}"] = path
+                print(f"[DONE] Highlights: {', '.join(str(p) for p in highlight_out.values())}")
+            else:
+                outputs["highlight_en"] = highlight_out
+                print(f"[DONE] Highlight: {highlight_out}")
         except Exception as e:
             print(f"[WARN] Highlight generation failed: {e}")
 
@@ -180,6 +190,18 @@ Examples:
         action="store_true",
         help="Also generate output/.../highlights/en/highlight_en.mp4",
     )
+    parser.add_argument(
+        "--compression",
+        "-c",
+        choices=("high", "medium", "low"),
+        default="medium",
+        help="Analysis depth for summarization and highlight narration length",
+    )
+    parser.add_argument(
+        "--languages",
+        default="en",
+        help="Comma-separated highlight languages: en,hi,kn,te,ta (default: en)",
+    )
 
     args = parser.parse_args()
 
@@ -201,6 +223,8 @@ Examples:
             quality=args.quality,
             model=args.model,
             highlight_video=args.highlight_video,
+            compression=args.compression,
+            highlight_languages=args.languages,
         )
         if outputs:
             print("\n All steps completed successfully!")

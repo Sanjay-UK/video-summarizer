@@ -21,6 +21,17 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "output" / "highlight_full_test")
     parser.add_argument("--model", default=None)
     parser.add_argument("--max-scenes", type=int, default=0)
+    parser.add_argument(
+        "--compression",
+        "-c",
+        choices=("high", "medium", "low"),
+        default="medium",
+    )
+    parser.add_argument(
+        "--languages",
+        default="en",
+        help="Comma-separated: en,hi,kn,te,ta",
+    )
     args = parser.parse_args()
 
     with open(args.segments, encoding="utf-8") as f:
@@ -33,8 +44,14 @@ def main() -> int:
         args.output,
         model=args.model,
         max_scenes=args.max_scenes,
+        compression=args.compression,
+        languages=args.languages,
     )
-    print(f"[DONE] Highlight video: {out} ({out.stat().st_size / (1024*1024):.2f} MB)")
+    if isinstance(out, dict):
+        for lang, path in out.items():
+            print(f"[DONE] highlight_{lang}: {path} ({path.stat().st_size / (1024*1024):.2f} MB)")
+    else:
+        print(f"[DONE] Highlight video: {out} ({out.stat().st_size / (1024*1024):.2f} MB)")
     return 0
 
 

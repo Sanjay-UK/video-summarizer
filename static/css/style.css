@@ -748,6 +748,24 @@ main {
     margin-bottom: 15px;
 }
 
+.highlight-lang-select {
+    display: block;
+    width: 100%;
+    max-width: 320px;
+    margin: 8px 0 12px;
+    padding: 8px 10px;
+    font-size: 0.95rem;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+}
+
+.highlight-video-player {
+    width: 100%;
+    max-width: 720px;
+    border-radius: 8px;
+    background: #000;
+}
+
 .action-footer {
     text-align: center;
     padding-top: 20px;

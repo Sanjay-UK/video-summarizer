@@ -30,11 +30,8 @@ def resolve_ffmpeg_bin() -> str:
     if env_path:
         candidates.append(env_path)
 
-    which = shutil.which("ffmpeg")
-    if which:
-        candidates.append(which)
-
     system = platform.system()
+    # Prefer ffmpeg-full before generic `ffmpeg` on PATH (Homebrew default lacks libass).
     if system == "Darwin":
         candidates.extend(
             [
@@ -42,6 +39,10 @@ def resolve_ffmpeg_bin() -> str:
                 "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
             ]
         )
+
+    which = shutil.which("ffmpeg")
+    if which:
+        candidates.append(which)
     elif system == "Windows":
         candidates.extend(
             [

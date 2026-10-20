@@ -23,7 +23,13 @@ from src.tts_generator import generate_audio_explanation
 from config import OUTPUT_DIR, DOWNLOADS_DIR
 from src.job_video import copy_source_video_to_job
 from src.highlight_ffmpeg import log_ffmpeg_subtitles_status_on_startup
-from src.highlight_pipeline import run_highlight_pipeline
+from src.highlight_jobs import (
+    highlight_file_for_lang,
+    list_highlight_downloads,
+    list_highlight_language_status,
+)
+from src.highlight_pipeline import retry_highlight_languages, run_highlight_pipeline
+from src.locales import LOCALES, parse_language_list
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
@@ -108,12 +114,14 @@ def process_video(
     model="llama3.2:3b",
     compression="medium",
     highlight_video: bool = False,
+    highlight_languages: str = "en",
 ):
     """Run complete pipeline in background.
 
     Args:
         compression: "high" (50%), "medium" (70%), or "low" (85%) compression
-        highlight_video: when True, also produce highlights/en/highlight_en.mp4
+        highlight_video: when True, also produce highlights/<lang>/highlight_<lang>.mp4
+        highlight_languages: comma-separated language codes (en, hi, kn, te, ta)
     """
     job = jobs[job_id]
 
@@ -172,7 +180,7 @@ def process_video(
         job.set_step("summarizing", 0.85)
         job.add_log("Summarization complete")
 
-        highlight_path = None
+        highlight_paths: dict[str, Path] = {}
 
         job.set_step("generating_audio", 0.90)
         job.add_log("Generating audio explanation with hierarchy...")
@@ -208,21 +216,34 @@ def process_video(
             job.set_step("generating_subtitles", 0.98)
 
         if highlight_video:
+            lang_codes = parse_language_list(highlight_languages)
             job.set_step("highlight_topics", 0.92)
             job.add_log("Selecting topics for highlight video...")
+            job.add_log(f"Highlight languages: {', '.join(lang_codes)} (translator: Google)")
             try:
                 with open(job.job_output_dir / "segments.json", encoding="utf-8") as f:
                     segments = json.load(f)
                 job.set_step("highlight_visuals", 0.94)
                 job.add_log("Extracting scene visuals and narration...")
                 job.set_step("highlight_assembly", 0.97)
-                highlight_path = run_highlight_pipeline(
+                highlight_out = run_highlight_pipeline(
                     staged_video,
                     segments,
                     job.job_output_dir,
                     model=model,
+                    compression=compression,
+                    languages=lang_codes,
                 )
-                job.add_log(f"Highlight video ready: {highlight_path.name}")
+                if isinstance(highlight_out, dict):
+                    highlight_paths = dict(highlight_out)
+                    for lang, path in highlight_out.items():
+                        job.add_log(f"Highlight {lang} ready: {path.name}")
+                else:
+                    highlight_paths = {"en": highlight_out}
+                    job.add_log(f"Highlight en ready: {highlight_out.name}")
+                for row in list_highlight_language_status(job.job_output_dir):
+                    if row["status"] == "failed":
+                        job.add_log(f"Highlight {row['code']} failed: {row.get('message', '')}")
             except Exception as e:
                 job.add_log(f"Highlight video failed: {e}")
             job.set_step("highlight_complete", 1.0)
@@ -237,12 +258,16 @@ def process_video(
         summary_path = job.job_output_dir / "summary.txt"
         summary_text = open(summary_path).read() if summary_path.exists() else ""
 
+        highlight_downloads = list_highlight_downloads(job.job_output_dir)
+        highlight_status = list_highlight_language_status(job.job_output_dir)
         results = {
             "status": "completed",
             "summary": summary_text,
             "transcript_length": len(transcription.get("text", "")),
             "summary_length": len(summary_text),
-            "highlight_video": highlight_path is not None,
+            "highlight_video": len(highlight_downloads) > 0,
+            "highlight_languages": highlight_downloads,
+            "highlight_language_status": highlight_status,
         }
 
         job.results = results
@@ -317,6 +342,11 @@ def summarize():
         model = request.form.get("model", "llama3.2:3b")
         compression = request.form.get("compression", "medium")
         highlight_video = request.form.get("highlight_video", "").lower() in ("1", "true", "on", "yes")
+        lang_parts = request.form.getlist("highlight_languages")
+        if not lang_parts:
+            raw_langs = request.form.get("highlight_languages", "en")
+            lang_parts = [p.strip() for p in raw_langs.split(",") if p.strip()]
+        highlight_languages = ",".join(lang_parts) if lang_parts else "en"
         uploaded_file = request.files.get("file")
 
         source = None
@@ -353,7 +383,7 @@ def summarize():
 
         thread = threading.Thread(
             target=process_video,
-            args=(job_id, source, model, compression, highlight_video),
+            args=(job_id, source, model, compression, highlight_video, highlight_languages),
             daemon=True
         )
         thread.start()
@@ -394,13 +424,16 @@ def results(job_id):
             summary_text = open(summary_path, "r").read()
             transcript_length = len(open(transcript_path, "r").read()) if transcript_path.exists() else 0
 
-            highlight_file = job_dir / "highlights" / "en" / "highlight_en.mp4"
+            highlight_downloads = list_highlight_downloads(job_dir)
+            highlight_status = list_highlight_language_status(job_dir)
             return jsonify({
                 "status": "completed",
                 "summary": summary_text,
                 "transcript_length": transcript_length,
                 "summary_length": len(summary_text),
-                "highlight_video": highlight_file.is_file(),
+                "highlight_video": len(highlight_downloads) > 0,
+                "highlight_languages": highlight_downloads,
+                "highlight_language_status": highlight_status,
             }), 200
         except Exception as e:
             print(f"[ERROR] Failed to load old job {job_id}: {e}")
@@ -482,24 +515,94 @@ def download_audio(job_id):
         print(f"[ERROR] Download audio failed: {e}")
         return "File not found", 404
 
-@app.route("/download/highlight/<job_id>")
-def download_highlight(job_id):
-    """Download highlight_en.mp4 when highlight generation was requested."""
-    try:
-        job = jobs.get(job_id)
-        if job:
-            file_path = job.job_output_dir / "highlights" / "en" / "highlight_en.mp4"
-        else:
-            file_path = OUTPUT_DIR / job_id / "highlights" / "en" / "highlight_en.mp4"
+def _job_output_dir(job_id: str) -> Path:
+    job = jobs.get(job_id)
+    if job:
+        return job.job_output_dir
+    return OUTPUT_DIR / job_id
 
+
+@app.route("/api/highlight/retry/<job_id>", methods=["POST"])
+def retry_highlight(job_id):
+    """Re-run failed highlight languages (reuses cache + shared visuals)."""
+    try:
+        job_dir = _job_output_dir(job_id)
+        if not job_dir.is_dir():
+            return jsonify({"error": "Job not found"}), 404
+
+        body = request.get_json(silent=True) or {}
+        langs = body.get("languages")
+        lang_list = None
+        if isinstance(langs, list) and langs:
+            lang_list = [str(x).strip().lower() for x in langs if str(x).strip()]
+
+        model = body.get("model")
+        compression = body.get("compression")
+
+        retry_highlight_languages(
+            job_dir,
+            lang_list,
+            model=model,
+            compression=compression,
+        )
+        status = list_highlight_language_status(job_dir)
+        downloads = list_highlight_downloads(job_dir)
+        return jsonify(
+            {
+                "ok": True,
+                "highlight_language_status": status,
+                "highlight_languages": downloads,
+                "highlight_video": len(downloads) > 0,
+            }
+        ), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/stream/highlight/<job_id>")
+@app.route("/stream/highlight/<job_id>/<lang_code>")
+def stream_highlight(job_id, lang_code: str = "en"):
+    """Inline MP4 for browser <video> (supports Range seeking)."""
+    try:
+        code = (lang_code or "en").strip().lower()
+        if code not in LOCALES:
+            return "Invalid language", 400
+        file_path = highlight_file_for_lang(_job_output_dir(job_id), code)
+        if file_path.is_file():
+            return send_file(
+                file_path,
+                mimetype="video/mp4",
+                as_attachment=False,
+                download_name=file_path.name,
+                conditional=True,
+            )
+        return "File not found", 404
+    except ValueError:
+        return "Invalid language", 400
+    except Exception as e:
+        print(f"[ERROR] Stream highlight failed: {e}")
+        return "File not found", 404
+
+
+@app.route("/download/highlight/<job_id>")
+@app.route("/download/highlight/<job_id>/<lang_code>")
+def download_highlight(job_id, lang_code: str = "en"):
+    """Download highlight_<lang>.mp4 for a completed job."""
+    try:
+        code = (lang_code or "en").strip().lower()
+        if code not in LOCALES:
+            return "Invalid language", 400
+        file_path = highlight_file_for_lang(_job_output_dir(job_id), code)
         if file_path.is_file():
             return send_file(
                 file_path,
                 as_attachment=True,
-                download_name="highlight_en.mp4",
+                download_name=file_path.name,
                 mimetype="video/mp4",
             )
         return "File not found", 404
+    except ValueError:
+        return "Invalid language", 400
     except Exception as e:
         print(f"[ERROR] Download highlight failed: {e}")
         return "File not found", 404

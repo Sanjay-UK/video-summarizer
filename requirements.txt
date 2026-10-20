@@ -7,3 +7,5 @@ edge-tts>=7.3.1
 gtts>=2.3.0
 Pillow>=10.0.0
 numpy>=1.24.0
+deep-translator>=1.11.0
+indic-transliteration>=2.3.0

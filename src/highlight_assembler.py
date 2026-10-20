@@ -9,12 +9,12 @@ from typing import Literal
 
 from config import (
     HIGHLIGHT_AUDIO_RATE,
-    HIGHLIGHT_FONT_NAME,
-    HIGHLIGHT_FONT_PATH,
     HIGHLIGHT_FPS,
     HIGHLIGHT_OUTPUT_HEIGHT,
     HIGHLIGHT_OUTPUT_WIDTH,
+    PROJECT_DIR,
 )
+from src.locales import FONTS_DIR
 from src.highlight_ffmpeg import escape_ffmpeg_filter_path, probe_duration_seconds, run_ffmpeg
 from src.highlight_timing import scene_display_duration
 from src.visual_extractor import VisualSelection
@@ -31,11 +31,19 @@ def _video_scale_filter() -> str:
 
 
 def _fonts_dir_for_ffmpeg() -> Path:
+    """Stage bundled highlight fonts for libass (all scripts in static/fonts)."""
     dest = Path(tempfile.gettempdir()) / "highlight_fonts"
     dest.mkdir(parents=True, exist_ok=True)
-    target = dest / HIGHLIGHT_FONT_PATH.name
-    if HIGHLIGHT_FONT_PATH.is_file():
-        shutil.copy2(HIGHLIGHT_FONT_PATH, target)
+    sources = [FONTS_DIR, PROJECT_DIR / "static" / "fonts"]
+    seen: set[str] = set()
+    for src_dir in sources:
+        if not src_dir.is_dir():
+            continue
+        for font in src_dir.glob("*.ttf"):
+            if font.name in seen:
+                continue
+            seen.add(font.name)
+            shutil.copy2(font, dest / font.name)
     return dest
 
 

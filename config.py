@@ -51,11 +51,30 @@ HIGHLIGHT_AUDIO_RATE = 44100
 HIGHLIGHT_OUTPUT_WIDTH = 1280
 HIGHLIGHT_OUTPUT_HEIGHT = 720
 HIGHLIGHT_TTS_VOICE = "en-US-GuyNeural"
+# Highlight translation: google (default) | nllb | ollama
+# Default highlight translation backend (recommended: google via deep-translator)
+HIGHLIGHT_TRANSLATOR = os.environ.get("HIGHLIGHT_TRANSLATOR", "google").strip().lower()
+HIGHLIGHT_TRANSLATION_MODEL = os.environ.get("HIGHLIGHT_TRANSLATION_MODEL", SUMMARIZATION_MODEL)
+# Extra terms to transliterate (comma-separated in env HIGHLIGHT_EXTRA_PROTECTED_TERMS)
+_extra_terms_raw = os.environ.get("HIGHLIGHT_EXTRA_PROTECTED_TERMS", "")
+HIGHLIGHT_EXTRA_PROTECTED_TERMS = frozenset(
+    t.strip().lower() for t in _extra_terms_raw.split(",") if t.strip()
+)
 HIGHLIGHT_OLLAMA_TEMPERATURE = 0.0
 HIGHLIGHT_OLLAMA_SEED = 42
 HIGHLIGHT_CAPTION_WORDS_PER_LINE = 7
+HIGHLIGHT_INDIC_CAPTION_CHARS_PER_LINE = 18
+HIGHLIGHT_TTS_MAX_SCENE_SECONDS = 20.0
+HIGHLIGHT_RENDER_MAX_PARALLEL_LANGS = 2
+HIGHLIGHT_GOOGLE_REQUEST_DELAY_SEC = float(os.environ.get("HIGHLIGHT_GOOGLE_REQUEST_DELAY_SEC", "1.25"))
 HIGHLIGHT_CLIP_DURATION_SEC = 4.0  # when motion triggers clip mode (configurable)
 HIGHLIGHT_PLACEHOLDER_WIDTH = 1280
 HIGHLIGHT_PLACEHOLDER_HEIGHT = 720
 HIGHLIGHT_FONT_PATH = PROJECT_DIR / "static" / "fonts" / "DejaVuSans.ttf"
 HIGHLIGHT_FONT_NAME = "Arial"
+# Max spoken words per highlight scene (ties to Analysis Depth / compression)
+HIGHLIGHT_NARRATION_MAX_WORDS = {
+    "high": 30,
+    "medium": 45,
+    "low": 70,
+}

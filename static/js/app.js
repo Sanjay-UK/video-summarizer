@@ -29,6 +29,227 @@ const SUBTASK_NAMES = {
 
 let highlightRequested = false;
 
+function toggleHighlightLangPanel() {
+ const panel = document.getElementById('highlightLangPanel');
+ const on = document.getElementById('highlightVideo')?.checked === true;
+ if (panel) {
+ panel.style.display = on ? 'block' : 'none';
+ }
+}
+
+function getSelectedHighlightLanguages() {
+ if (!document.getElementById('highlightVideo')?.checked) {
+ return [];
+ }
+ const boxes = document.querySelectorAll('input[name="highlight_languages"]:checked');
+ let langs = Array.from(boxes).map((b) => b.value);
+ if (!langs.includes('en')) {
+ langs.unshift('en');
+ }
+ if (langs.length === 0) {
+ langs = ['en'];
+ }
+ return langs;
+}
+
+function highlightStreamUrl(jobId, langCode) {
+ return `/stream/highlight/${jobId}/${langCode}`;
+}
+
+function playHighlightLang(langCode) {
+ if (!currentJobId || !langCode) {
+ return;
+ }
+ const player = document.getElementById('highlightVideoPlayer');
+ const select = document.getElementById('highlightLangSelect');
+ if (select && select.value !== langCode) {
+ select.value = langCode;
+ }
+ if (player) {
+ player.src = highlightStreamUrl(currentJobId, langCode);
+ player.load();
+ }
+}
+
+function onHighlightLangSelectChange() {
+ const select = document.getElementById('highlightLangSelect');
+ if (select?.value) {
+ playHighlightLang(select.value);
+ }
+}
+
+function listenAudioUrl(jobId, optionValue) {
+ if (!jobId || !optionValue) {
+ return '';
+ }
+ if (optionValue === 'summary-en') {
+ return `/download/audio/${jobId}`;
+ }
+ return highlightStreamUrl(jobId, optionValue);
+}
+
+function setupListenLanguageOptions(jobId, results) {
+ const select = document.getElementById('listenLangSelect');
+ if (!select || !jobId) {
+ return;
+ }
+ const options = [{ value: 'summary-en', label: 'English — full summary' }];
+ const statusRows = results.highlight_language_status || [];
+ const langs = results.highlight_languages || [];
+ const highlightCodes = new Set();
+ for (const row of statusRows) {
+ if (row.status === 'success' && row.download_available) {
+ highlightCodes.add(row.code);
+ }
+ }
+ for (const l of langs) {
+ highlightCodes.add(l.code);
+ }
+ for (const code of highlightCodes) {
+ const meta = langs.find((x) => x.code === code);
+ const row = statusRows.find((x) => x.code === code);
+ const name = meta?.name || row?.name || code;
+ options.push({ value: code, label: `${name} — highlight narration` });
+ }
+ select.innerHTML = options
+ .map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`)
+ .join('');
+ loadListenAudio(jobId, select.value || 'summary-en');
+}
+
+function loadListenAudio(jobId, optionValue) {
+ const audioPlayer = document.getElementById('audioPlayer');
+ const audioSource = document.getElementById('audioSource');
+ if (!audioSource || !audioPlayer) {
+ return;
+ }
+ const url = listenAudioUrl(jobId, optionValue);
+ const isHighlight = optionValue && optionValue !== 'summary-en';
+ audioSource.type = isHighlight ? 'video/mp4' : 'audio/mpeg';
+ audioSource.src = url;
+ audioPlayer.load();
+}
+
+function onListenLangSelectChange() {
+ const select = document.getElementById('listenLangSelect');
+ if (currentJobId && select?.value) {
+ loadListenAudio(currentJobId, select.value);
+ }
+}
+
+function renderHighlightDownloads(jobId, results) {
+ const card = document.getElementById('highlightResultCard');
+ const list = document.getElementById('highlightDownloadList');
+ const statusList = document.getElementById('highlightLangStatusList');
+ const retryBtn = document.getElementById('highlightRetryBtn');
+ const playerWrap = document.getElementById('highlightPlayerWrap');
+ const player = document.getElementById('highlightVideoPlayer');
+ const langSelect = document.getElementById('highlightLangSelect');
+ if (!card || !list) {
+ return;
+ }
+ const statusRows = results.highlight_language_status || [];
+ const langs = results.highlight_languages || [];
+ const hasHighlight =
+ statusRows.length > 0 || (results.highlight_video && langs.length > 0);
+ if (!hasHighlight) {
+ card.style.display = 'none';
+ list.innerHTML = '';
+ if (statusList) statusList.innerHTML = '';
+ if (retryBtn) retryBtn.style.display = 'none';
+ if (playerWrap) playerWrap.style.display = 'none';
+ if (player) player.removeAttribute('src');
+ return;
+ }
+ card.style.display = 'block';
+ if (statusList && statusRows.length > 0) {
+ statusList.innerHTML = statusRows
+ .map((row) => {
+ const ok = row.status === 'success' && row.download_available;
+ const label = ok
+ ? `✓ ${escapeHtml(row.name)} (${escapeHtml(row.code)})`
+ : `✗ ${escapeHtml(row.name)} (${escapeHtml(row.code)})`;
+ const translatorLabel =
+ row.translator === 'source' || row.code === 'en'
+ ? 'English source'
+ : row.translator
+ ? row.translator
+ : '';
+ const detail = ok
+ ? [
+ translatorLabel ? `Translated with: ${escapeHtml(translatorLabel)}` : '',
+ row.translation_seconds != null ? `translate ${row.translation_seconds}s` : '',
+ row.tts_seconds != null ? `TTS ${row.tts_seconds}s` : '',
+ row.render_seconds != null ? `render ${row.render_seconds}s` : '',
+ row.total_seconds != null ? `total ${row.total_seconds}s` : '',
+ ]
+ .filter(Boolean)
+ .join(' · ')
+ : escapeHtml(row.message || 'Failed');
+ const btn =
+ ok && row.filename
+ ? `<button type="button" class="btn btn-secondary" style="margin-left: 8px;" onclick="playHighlightLang('${escapeHtml(row.code)}')">Play</button>` +
+ `<button type="button" class="btn btn-secondary" style="margin-left: 8px;" onclick="downloadHighlightLang('${escapeHtml(row.code)}')">Download</button>`
+ : '';
+ return `<div class="highlight-lang-row" style="margin: 8px 0; padding: 8px 10px; border-radius: 6px; background: ${ok ? 'rgba(46,125,50,0.12)' : 'rgba(198,40,40,0.1)'};"><strong>${label}</strong><div style="font-size: 0.9em; margin-top: 4px;">${detail}</div>${btn}</div>`;
+ })
+ .join('');
+ } else if (statusList) {
+ statusList.innerHTML = '';
+ }
+ list.innerHTML = '';
+
+ if (playerWrap && langSelect && langs.length > 0 && jobId) {
+ langSelect.innerHTML = langs
+ .map((l) => `<option value="${escapeHtml(l.code)}">${escapeHtml(l.name)}</option>`)
+ .join('');
+ playerWrap.style.display = 'block';
+ playHighlightLang(langs[0].code);
+ } else if (playerWrap) {
+ playerWrap.style.display = 'none';
+ }
+
+ const anyFailed = statusRows.some((r) => r.status === 'failed');
+ if (retryBtn) {
+ retryBtn.style.display = anyFailed && jobId ? 'inline-block' : 'none';
+ }
+}
+
+async function retryFailedHighlightLanguages() {
+ if (!currentJobId) {
+ return;
+ }
+ const retryBtn = document.getElementById('highlightRetryBtn');
+ if (retryBtn) {
+ retryBtn.disabled = true;
+ retryBtn.textContent = 'Retrying…';
+ }
+ try {
+ const resp = await fetch(`/api/highlight/retry/${currentJobId}`, {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({}),
+ });
+ const data = await resp.json();
+ if (!resp.ok) {
+ throw new Error(data.error || 'Retry failed');
+ }
+ const results = {
+ highlight_video: data.highlight_video,
+ highlight_languages: data.highlight_languages || [],
+ highlight_language_status: data.highlight_language_status || [],
+ };
+ renderHighlightDownloads(currentJobId, results);
+ } catch (e) {
+ alert(e.message || String(e));
+ } finally {
+ if (retryBtn) {
+ retryBtn.disabled = false;
+ retryBtn.textContent = 'Retry failed languages';
+ }
+ }
+}
+
 let currentJobId = null;
 let progressPoller = null;
 let currentTab = 'url';
@@ -159,6 +380,9 @@ async function startSummarization() {
  formData.append('compression', compression);
  if (highlightRequested) {
  formData.append('highlight_video', '1');
+ getSelectedHighlightLanguages().forEach((lang) => {
+ formData.append('highlight_languages', lang);
+ });
  }
 
  const highlightSubtask = document.getElementById('subtask-highlight');
@@ -323,17 +547,7 @@ async function showResults(data) {
 
  console.log('[SUMMARY] Rendered markdown:', summaryText.substring(0, 100) + '...');
 
- // Set audio player source and reload
- const audioPlayer = document.getElementById('audioPlayer');
- const audioSource = document.getElementById('audioSource');
- if (audioSource && audioPlayer) {
- const audioUrl = `/download/audio/${currentJobId}`;
- audioSource.src = audioUrl;
- audioPlayer.load(); // Critical: reload the audio element
- console.log('[RESULTS] Audio player loaded:', audioUrl);
- } else {
- console.warn('[RESULTS] Audio player elements not found');
- }
+ setupListenLanguageOptions(currentJobId, results);
 
  // Calculate stats
  const origLength = (results.transcript_length || 0);
@@ -344,10 +558,7 @@ async function showResults(data) {
  document.getElementById('summaryLength').textContent = `${Math.round(summLength / 100) / 10}k chars`;
  document.getElementById('compression').textContent = `${compression}%`;
 
- const highlightCard = document.getElementById('highlightResultCard');
- if (highlightCard) {
- highlightCard.style.display = results.highlight_video ? 'block' : 'none';
- }
+ renderHighlightDownloads(currentJobId, results);
  } catch (error) {
  console.error('[RESULTS ERROR]', error);
  }
@@ -391,10 +602,17 @@ function downloadSummary() {
  }
 }
 
-function downloadAudio() {
- if (currentJobId) {
- window.location.href = `/download/audio/${currentJobId}`;
+function downloadListenAudio() {
+ if (!currentJobId) {
+ return;
  }
+ const select = document.getElementById('listenLangSelect');
+ const value = select?.value || 'summary-en';
+ if (value === 'summary-en') {
+ window.location.href = `/download/audio/${currentJobId}`;
+ return;
+ }
+ downloadHighlightLang(value);
 }
 
 function downloadSubtitles() {
@@ -403,9 +621,9 @@ function downloadSubtitles() {
  }
 }
 
-function downloadHighlight() {
- if (currentJobId) {
- window.location.href = `/download/highlight/${currentJobId}`;
+function downloadHighlightLang(langCode) {
+ if (currentJobId && langCode) {
+ window.location.href = `/download/highlight/${currentJobId}/${langCode}`;
  }
 }
 
@@ -501,26 +719,7 @@ function loadJobResults(jobId, updateUrl = true) {
  summaryContainer.innerHTML = htmlContent;
  summaryContainer.classList.add('markdown-body');
 
- // Update audio player
- const audioPlayer = document.getElementById('audioPlayer');
- const audioSource = document.getElementById('audioSource');
- if (audioSource && audioPlayer) {
- const audioUrl = `/download/audio/${jobId}`;
- audioSource.src = audioUrl;
- audioPlayer.load(); // Reload the audio element
- console.log('[LOAD JOB] Audio source set to:', audioUrl);
-
- // Add error handling
- audioPlayer.onerror = function() {
- console.warn('[AUDIO] Failed to load audio for job:', jobId);
- };
-
- audioPlayer.oncanplay = function() {
- console.log('[AUDIO] Audio loaded successfully');
- };
- } else {
- console.warn('[LOAD JOB] Audio player elements not found');
- }
+ setupListenLanguageOptions(jobId, results);
 
  // Update stats
  const origLength = (results.transcript_length || 0);
@@ -530,6 +729,8 @@ function loadJobResults(jobId, updateUrl = true) {
  document.getElementById('originalLength').textContent = `${Math.round(origLength / 100) / 10}k chars`;
  document.getElementById('summaryLength').textContent = `${Math.round(summLength / 100) / 10}k chars`;
  document.getElementById('compression').textContent = `${compression}%`;
+
+ renderHighlightDownloads(jobId, results);
 
  console.log('[LOAD JOB] Summary loaded successfully');
  })
@@ -574,6 +775,7 @@ window.addEventListener('load', () => {
 
  // Set initial button state
  validateInputs();
+ toggleHighlightLangPanel();
 
  // Refresh history every 5 seconds
  setInterval(loadHistory, 5000);
