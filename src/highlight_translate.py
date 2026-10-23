@@ -8,11 +8,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from src.locales import LocaleSpec, get_locale, text_has_target_script
-from src.term_protection import finalize_indic_translation_with_log
+from src.term_protection import finalize_indic_translation_with_log, translate_text_preserving_english_code
 from src.translators.factory import get_highlight_translator
 from src.translators.google_backend import (
     GoogleTranslateError,
     google_translate_batch,
+    google_translate_text,
     is_rate_limit_error,
 )
 from src.translators.google_circuit import GoogleJobCircuitBreaker
@@ -87,8 +88,26 @@ def _translate_google_batch_for_backend(
 
     try:
         if pending_texts:
+            needs_code_split = any("`" in t for t in pending_texts)
             try:
-                raw_batch = google_translate_batch(pending_texts, locale.code)
+                if needs_code_split:
+
+                    def _google_prose(seg: str, lc: str = locale.code) -> str:
+                        hit = cache.get(lc, backend_name, seg)
+                        if hit is not None:
+                            return hit
+                        return google_translate_text(seg, lc, throttle=True)
+
+                    raw_batch = [
+                        translate_text_preserving_english_code(en, _google_prose)
+                        for en in pending_texts
+                    ]
+                else:
+                    raw_batch = google_translate_batch(
+                        pending_texts,
+                        locale.code,
+                        throttle=True,
+                    )
             except GoogleTranslateError as exc:
                 elapsed = time.perf_counter() - t0
                 kind = "rate_limit" if is_rate_limit_error(exc) else "error"
@@ -246,6 +265,7 @@ def translate_language_scenes(
     cache: JobTranslationCache,
     term_log: TranslationTermLog,
     google_circuit: Optional[GoogleJobCircuitBreaker] = None,
+    backend_chain: Optional[tuple[str, ...]] = None,
 ) -> LanguageTranslationOutcome:
     if lang == "en":
         return LanguageTranslationOutcome(
@@ -257,7 +277,7 @@ def translate_language_scenes(
         )
 
     locale = get_locale(lang)
-    chain = available_chain()
+    chain = list(backend_chain) if backend_chain else available_chain()
     last: LanguageTranslationOutcome | None = None
 
     for backend in chain:

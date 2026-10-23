@@ -61,12 +61,15 @@ class NllbSceneTranslator:
         tgt = _NLLB_LANG[locale.code]
         engine.tokenizer.src_lang = src
         inputs = engine.tokenizer(english_text.strip(), return_tensors="pt").to(engine.device)
+        input_tokens = int(inputs["input_ids"].shape[-1])
+        # Short highlight lines stay fast; summary chunks need a larger decode budget.
+        max_new_tokens = min(1536, max(256, int(input_tokens * 2.5)))
         forced_bos = engine.tokenizer.convert_tokens_to_ids(tgt)
         with torch.no_grad():
             tokens = engine.model.generate(
                 **inputs,
                 forced_bos_token_id=forced_bos,
-                max_length=256,
+                max_new_tokens=max_new_tokens,
             )
         out = engine.tokenizer.decode(tokens[0], skip_special_tokens=True).strip()
         if not out:

@@ -106,6 +106,20 @@ def list_highlight_downloads(job_dir: Path) -> list[dict[str, Any]]:
     return found
 
 
+def list_output_languages(job_dir: Path) -> list[dict[str, Any]]:
+    """Languages the user opted in at job start (drives results UI)."""
+    data = read_highlight_status(job_dir)
+    requested = data.get("requested_languages") or []
+    if not requested:
+        requested = ["en"]
+    out: list[dict[str, Any]] = []
+    for code in requested:
+        spec = LOCALES.get(code)
+        if spec:
+            out.append({"code": code, "name": spec.name})
+    return out if out else [{"code": "en", "name": "English"}]
+
+
 def failed_highlight_languages(job_dir: Path) -> list[str]:
     failed: list[str] = []
     for row in list_highlight_language_status(job_dir):

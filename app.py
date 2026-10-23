@@ -20,16 +20,21 @@ from src.transcriber import transcribe_audio
 from src.summarizer import summarize_transcript
 from src.subtitle_generator import generate_subtitles
 from src.tts_generator import generate_audio_explanation
-from config import OUTPUT_DIR, DOWNLOADS_DIR
+from config import OUTPUT_DIR, DOWNLOADS_DIR, choose_whisper_model, choose_whisper_model
 from src.job_video import copy_source_video_to_job
 from src.highlight_ffmpeg import log_ffmpeg_subtitles_status_on_startup
 from src.highlight_jobs import (
     highlight_file_for_lang,
     list_highlight_downloads,
     list_highlight_language_status,
+    list_output_languages,
+    read_highlight_status,
+    write_highlight_status,
 )
 from src.highlight_pipeline import retry_highlight_languages, run_highlight_pipeline
 from src.locales import LOCALES, parse_language_list
+from src.summary_jobs import clean_summary_text_for_display, summary_translations_for_api
+from src.summary_translate import summary_text_for_language, translate_summary_for_languages
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
@@ -162,8 +167,16 @@ def process_video(
         job.add_log(f"Audio extracted: {audio_path.name}")
 
         job.set_step("transcribing", 0.30)
-        job.add_log("Transcribing audio (this may take a few minutes)...")
-        transcription = transcribe_audio(audio_path, model="base", output_dir=job.job_output_dir)
+        from src.highlight_ffmpeg import probe_duration_seconds
+
+        audio_duration = probe_duration_seconds(audio_path)
+        whisper_model = choose_whisper_model(audio_duration)
+        job.add_log(
+            f"Transcribing audio (~{audio_duration:.0f}s) with Whisper model: {whisper_model}..."
+        )
+        transcription = transcribe_audio(
+            audio_path, model=whisper_model, output_dir=job.job_output_dir
+        )
         job.set_step("transcribing", 0.65)
         segments_count = len(transcription.get("segments", []))
         job.add_log(f"Transcription complete: {segments_count} segments")
@@ -180,12 +193,30 @@ def process_video(
         job.set_step("summarizing", 0.85)
         job.add_log("Summarization complete")
 
+        output_lang_codes = parse_language_list(highlight_languages)
+        hl_status = read_highlight_status(job.job_output_dir)
+        hl_status["requested_languages"] = output_lang_codes
+        write_highlight_status(job.job_output_dir, hl_status)
+
+        summary_text = open(job.job_output_dir / "summary.txt", encoding="utf-8").read()
+        summary_extra_langs = [c for c in output_lang_codes if c != "en"]
+        if summary_extra_langs:
+            job.add_log(f"Translating comprehensive summary: {', '.join(summary_extra_langs)}")
+            try:
+                translate_summary_for_languages(
+                    job.job_output_dir,
+                    summary_text,
+                    output_lang_codes,
+                )
+                job.add_log("Summary translations complete")
+            except Exception as exc:
+                job.add_log(f"Summary translation failed: {exc}")
+
         highlight_paths: dict[str, Path] = {}
 
         job.set_step("generating_audio", 0.90)
         job.add_log("Generating audio explanation with hierarchy...")
         try:
-            summary_text = open(job.job_output_dir / "summary.txt").read()
 
             # Generate audio with hierarchy-aware prosody
             # Returns: (audio_path, audio_transcript)
@@ -215,8 +246,9 @@ def process_video(
             job.add_log(f"Audio/subtitle generation failed: {str(e)}")
             job.set_step("generating_subtitles", 0.98)
 
-        if highlight_video:
-            lang_codes = parse_language_list(highlight_languages)
+        wants_highlight = highlight_video or any(c != "en" for c in output_lang_codes)
+        if wants_highlight:
+            lang_codes = output_lang_codes
             job.set_step("highlight_topics", 0.92)
             job.add_log("Selecting topics for highlight video...")
             job.add_log(f"Highlight languages: {', '.join(lang_codes)} (translator: Google)")
@@ -256,10 +288,12 @@ def process_video(
         job.completed_at = datetime.now()
 
         summary_path = job.job_output_dir / "summary.txt"
-        summary_text = open(summary_path).read() if summary_path.exists() else ""
+        summary_text = open(summary_path, encoding="utf-8").read() if summary_path.exists() else ""
+        summary_text = clean_summary_text_for_display(summary_text, "en")
 
         highlight_downloads = list_highlight_downloads(job.job_output_dir)
         highlight_status = list_highlight_language_status(job.job_output_dir)
+        summary_i18n = summary_translations_for_api(job.job_output_dir)
         results = {
             "status": "completed",
             "summary": summary_text,
@@ -268,6 +302,8 @@ def process_video(
             "highlight_video": len(highlight_downloads) > 0,
             "highlight_languages": highlight_downloads,
             "highlight_language_status": highlight_status,
+            **summary_i18n,
+            "output_languages": list_output_languages(job.job_output_dir),
         }
 
         job.results = results
@@ -347,6 +383,9 @@ def summarize():
             raw_langs = request.form.get("highlight_languages", "en")
             lang_parts = [p.strip() for p in raw_langs.split(",") if p.strip()]
         highlight_languages = ",".join(lang_parts) if lang_parts else "en"
+        lang_codes_for_highlight = parse_language_list(highlight_languages)
+        if not highlight_video and any(c != "en" for c in lang_codes_for_highlight):
+            highlight_video = True
         uploaded_file = request.files.get("file")
 
         source = None
@@ -421,11 +460,13 @@ def results(job_id):
 
     if summary_path.exists():
         try:
-            summary_text = open(summary_path, "r").read()
-            transcript_length = len(open(transcript_path, "r").read()) if transcript_path.exists() else 0
+            summary_text = open(summary_path, encoding="utf-8").read()
+            summary_text = clean_summary_text_for_display(summary_text, "en")
+            transcript_length = len(open(transcript_path, encoding="utf-8").read()) if transcript_path.exists() else 0
 
             highlight_downloads = list_highlight_downloads(job_dir)
             highlight_status = list_highlight_language_status(job_dir)
+            summary_i18n = summary_translations_for_api(job_dir)
             return jsonify({
                 "status": "completed",
                 "summary": summary_text,
@@ -434,6 +475,8 @@ def results(job_id):
                 "highlight_video": len(highlight_downloads) > 0,
                 "highlight_languages": highlight_downloads,
                 "highlight_language_status": highlight_status,
+                **summary_i18n,
+                "output_languages": list_output_languages(job_dir),
             }), 200
         except Exception as e:
             print(f"[ERROR] Failed to load old job {job_id}: {e}")
@@ -450,21 +493,31 @@ def history():
     }), 200
 
 @app.route("/download/summary/<job_id>")
-def download_summary(job_id):
-    """Download summary text file."""
+@app.route("/download/summary/<job_id>/<lang_code>")
+def download_summary(job_id, lang_code: str = "en"):
+    """Download summary text file (English or translated)."""
     try:
-        job = jobs.get(job_id)
-        if job:
-            file_path = job.job_output_dir / "summary.txt"
+        code = (lang_code or "en").strip().lower()
+        if code not in LOCALES:
+            return "Invalid language", 400
+        job_dir = _job_output_dir(job_id)
+        if code == "en":
+            file_path = job_dir / "summary.txt"
+            download_name = "summary.txt"
         else:
-            file_path = OUTPUT_DIR / job_id / "summary.txt"
+            file_path = job_dir / f"summary_{code}.txt"
+            download_name = f"summary_{code}.txt"
+            if not file_path.is_file():
+                text = summary_text_for_language(job_dir, code)
+                if text:
+                    file_path.write_text(text, encoding="utf-8")
 
-        if file_path.exists():
+        if file_path.is_file():
             return send_file(
                 file_path,
                 as_attachment=True,
-                download_name="summary.txt",
-                mimetype="text/plain"
+                download_name=download_name,
+                mimetype="text/plain",
             )
         return "File not found", 404
     except Exception as e:

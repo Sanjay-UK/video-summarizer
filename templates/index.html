@@ -111,8 +111,8 @@
  </span>
  </label>
 
- <div id="highlightLangPanel" class="highlight-lang-panel" style="display: none; margin-top: 14px; padding-left: 28px;">
- <p class="option-desc" style="margin-bottom: 10px;">Select languages. Each extra language adds render time.</p>
+ <div id="highlightLangPanel" class="highlight-lang-panel" style="margin-top: 14px; padding-left: 28px;">
+ <p class="option-desc" style="margin-bottom: 10px;">Select languages for the comprehensive summary (and highlight video when enabled). Extra languages add translation time.</p>
  <label class="checkbox-option" style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
  <input type="checkbox" name="highlight_languages" value="en" checked>
  <span class="option-label">English</span>
@@ -159,6 +159,7 @@
  <div class="progress-header">
  <h2>Processing Your Video</h2>
  <p>This typically takes few minutes</p>
+ <p id="progressJobId" class="job-id-display" style="margin-top: 12px; color: #888; font-size: 13px;"></p>
  </div>
 
  <!-- Main Progress -->
@@ -235,14 +236,21 @@
  </div>
  </div>
 
+ <div class="results-lang-bar" style="margin: 20px 0 24px;">
+ <label for="resultsLangSelect" class="progress-label">Language</label>
+ <select id="resultsLangSelect" class="highlight-lang-select" onchange="onResultsLanguageChange()"></select>
+ <p class="option-desc" style="margin-top: 8px;">Summary, audio, and highlight video follow this selection.</p>
+ </div>
+
  <!-- Highlight video (optional) -->
  <div class="result-card" id="highlightResultCard" style="display: none;">
  <h2>Highlight Video</h2>
  <p id="highlightResultDesc">Narrated summary with key scenes</p>
  <div id="highlightPlayerWrap" style="display: none; margin-bottom: 16px;">
- <label for="highlightLangSelect" class="progress-label">Preview language</label>
- <select id="highlightLangSelect" class="highlight-lang-select" onchange="onHighlightLangSelectChange()"></select>
  <video id="highlightVideoPlayer" class="highlight-video-player" controls playsinline preload="metadata"></video>
+ <button type="button" class="btn btn-secondary" id="highlightDownloadBtn" style="margin-top: 12px; display: none;" onclick="downloadHighlightForResultsLang()">
+ Download highlight video
+ </button>
  </div>
  <div id="highlightLangStatusList" class="highlight-lang-status"></div>
  <div id="highlightDownloadList" style="display: none;" aria-hidden="true"></div>
@@ -254,15 +262,10 @@
  <!-- Audio -->
  <div class="result-card" id="listenResultCard">
  <h2>Listen to Summary</h2>
- <label for="listenLangSelect" class="progress-label">Language</label>
- <select id="listenLangSelect" class="highlight-lang-select" onchange="onListenLangSelectChange()"></select>
  <audio controls class="audio-player" id="audioPlayer" controlsList="nodownload">
  <source id="audioSource" src="" type="audio/mpeg">
  Your browser does not support the audio element.
  </audio>
- <p style="color: #999; font-size: 13px; margin-top: 10px;">
- English uses the full summary audio. Other languages use the highlight narration track.
- </p>
  <button class="btn btn-secondary" onclick="downloadListenAudio()">
  Download Audio
  </button>
@@ -271,7 +274,7 @@
  <!-- Summary -->
  <div class="result-card">
  <h2>Comprehensive Summary</h2>
- <div class="summary-text" id="summaryContent">Loading...</div>
+ <div class="summary-text markdown-body" id="summaryContentDisplay">Loading...</div>
  <button class="btn btn-secondary" onclick="downloadSummary()">
  Download Text
  </button>

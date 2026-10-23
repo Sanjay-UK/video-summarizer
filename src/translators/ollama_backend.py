@@ -89,8 +89,12 @@ class OllamaSceneTranslator:
         try:
             data = _extract_json_object(raw)
             translated = _coerce_translated_field(data)
-        except ValueError:
+        except ValueError as exc:
+            if "{" in raw and len(raw) > 200:
+                raise ValueError("Ollama returned non-JSON or partial JSON for long text") from exc
             translated = raw
         if not translated:
             raise ValueError("empty translated field")
+        if "{" in translated and '"translated"' in translated.lower():
+            raise ValueError("Ollama leaked JSON wrapper into translation text")
         return translated

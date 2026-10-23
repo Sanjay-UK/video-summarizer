@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import threading
 from dataclasses import dataclass, field
 
 
@@ -12,15 +13,18 @@ class GoogleJobCircuitBreaker:
 
     tripped: bool = False
     reason: str = ""
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def trip(self, reason: str) -> None:
-        self.tripped = True
-        if reason:
-            self.reason = reason
+        with self._lock:
+            self.tripped = True
+            if reason:
+                self.reason = reason
 
     @property
     def open(self) -> bool:
-        return self.tripped
+        with self._lock:
+            return self.tripped
 
 
 _active_breaker: contextvars.ContextVar[GoogleJobCircuitBreaker | None] = contextvars.ContextVar(

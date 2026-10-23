@@ -13,8 +13,17 @@ YOUTUBE_TOOLS_DIR = Path(os.path.expanduser("~/Documents/Recordings/video_and_yt
 SUBTITLE_GEN_DIR = Path(os.path.expanduser("~/Documents/Recordings/subtitle-gen"))
 
 # Whisper settings
-WHISPER_MODEL = "base"
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
+WHISPER_MODEL_SHORT = os.environ.get("WHISPER_MODEL_SHORT", "tiny")
+WHISPER_SHORT_UPLOAD_MAX_SEC = float(os.environ.get("WHISPER_SHORT_UPLOAD_MAX_SEC", "180"))
 WHISPER_DEVICE = "cpu"
+
+
+def choose_whisper_model(duration_seconds: float | None) -> str:
+    """Use a smaller/faster Whisper model for short uploads (default: under 3 minutes)."""
+    if duration_seconds is not None and duration_seconds <= WHISPER_SHORT_UPLOAD_MAX_SEC:
+        return WHISPER_MODEL_SHORT
+    return WHISPER_MODEL
 
 # Video settings
 VIDEO_QUALITY = "360p"
@@ -65,8 +74,23 @@ HIGHLIGHT_OLLAMA_SEED = 42
 HIGHLIGHT_CAPTION_WORDS_PER_LINE = 7
 HIGHLIGHT_INDIC_CAPTION_CHARS_PER_LINE = 18
 HIGHLIGHT_TTS_MAX_SCENE_SECONDS = 20.0
-HIGHLIGHT_RENDER_MAX_PARALLEL_LANGS = 2
-HIGHLIGHT_GOOGLE_REQUEST_DELAY_SEC = float(os.environ.get("HIGHLIGHT_GOOGLE_REQUEST_DELAY_SEC", "1.25"))
+def _default_highlight_render_parallel() -> int:
+    raw = os.environ.get("HIGHLIGHT_RENDER_MAX_PARALLEL_LANGS", "").strip()
+    if raw:
+        try:
+            return max(1, min(4, int(raw)))
+        except ValueError:
+            pass
+    cpu = os.cpu_count() or 4
+    if cpu >= 8:
+        return 4
+    if cpu >= 4:
+        return 3
+    return 2
+
+
+HIGHLIGHT_RENDER_MAX_PARALLEL_LANGS = _default_highlight_render_parallel()
+HIGHLIGHT_GOOGLE_REQUEST_DELAY_SEC = float(os.environ.get("HIGHLIGHT_GOOGLE_REQUEST_DELAY_SEC", "1.0"))
 HIGHLIGHT_CLIP_DURATION_SEC = 4.0  # when motion triggers clip mode (configurable)
 HIGHLIGHT_PLACEHOLDER_WIDTH = 1280
 HIGHLIGHT_PLACEHOLDER_HEIGHT = 720

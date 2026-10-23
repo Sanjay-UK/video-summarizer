@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from config import HIGHLIGHT_RENDER_MAX_PARALLEL_LANGS, HIGHLIGHT_TRANSLATOR
-from src.highlight_assembler import build_scene_video, concat_scenes
+from src.highlight_assembler import concat_scenes
+from src.highlight_shared_video import ensure_shared_scene_visuals, mux_language_scene, read_scene_timing_manifest
 from src.highlight_ffmpeg import require_ffmpeg_subtitles_filter
 from src.highlight_captions import build_scene_ass
 from src.highlight_jobs import (
@@ -36,6 +37,30 @@ from src.translation import SceneTranslationResult
 from src.translation_cache import JobTranslationCache
 from src.translation_log import TranslationTermLog
 from src.visual_extractor import VisualSelection, extract_visuals_for_scenes, write_visual_manifest
+
+
+def _translate_highlight_language(
+    lang: str,
+    english_texts: list[str],
+    *,
+    trans_cache: JobTranslationCache,
+    term_log: TranslationTermLog,
+    google_breaker: GoogleJobCircuitBreaker,
+) -> tuple[str, LanguageTranslationOutcome]:
+    """Worker: bind shared Google circuit breaker in this thread (contextvars)."""
+    token = set_google_circuit_breaker(google_breaker)
+    try:
+        print(f"[INFO] Translating highlight language (parallel): {lang}", file=sys.stderr)
+        outcome = translate_language_scenes(
+            lang,
+            english_texts,
+            cache=trans_cache,
+            term_log=term_log,
+            google_circuit=google_breaker,
+        )
+        return lang, outcome
+    finally:
+        reset_google_circuit_breaker(token)
 
 
 def resolve_job_video(video_path: Path, job_output_dir: Path) -> Path:
@@ -176,6 +201,9 @@ def _render_language_media(
     highlight_root = job_output_dir / "highlights" / lang
     highlight_root.mkdir(parents=True, exist_ok=True)
 
+    timing_rows = read_scene_timing_manifest(job_output_dir)
+    timing_by_index = {int(r["scene_index"]): float(r["display_seconds"]) for r in timing_rows}
+
     tts_start = time.perf_counter()
     scene_videos: list[Path] = []
     narration_manifest: list[dict[str, Any]] = []
@@ -188,8 +216,11 @@ def _render_language_media(
         scene_dir.mkdir(parents=True, exist_ok=True)
         (scene_dir / "narration.txt").write_text(spoken, encoding="utf-8")
 
+        display_sec = timing_by_index.get(visual.scene_index)
+        if display_sec is None:
+            raise RuntimeError(f"Missing shared timing for scene {visual.scene_index}")
+
         tts = generate_scene_narration(spoken, scene_dir / "narration.mp3", locale=locale)
-        display_sec = scene_display_duration(tts.duration_seconds)
         ass_path = build_scene_ass(
             tts,
             display_sec,
@@ -197,12 +228,13 @@ def _render_language_media(
             locale=locale,
         )
 
-        final_scene = build_scene_video(
-            visual,
+        final_scene = mux_language_scene(
+            job_output_dir,
+            visual.scene_index,
+            display_sec,
             tts.audio_path,
             ass_path,
-            tts.duration_seconds,
-            scene_dir / "build",
+            scene_dir / "build" / f"scene_{visual.scene_index:03d}_final.mp4",
         )
         scene_videos.append(final_scene)
 
@@ -320,38 +352,56 @@ def run_highlight_pipeline(
         google_breaker.trip("HIGHLIGHT_DISABLE_GOOGLE")
     breaker_token = set_google_circuit_breaker(google_breaker)
 
-    # Phase 1: translate each language sequentially (backend chain per language)
+    # Phase 1: translate languages in parallel (shared cache + Google circuit breaker)
     translations: dict[str, LanguageTranslationOutcome] = {}
+    translate_workers = min(len(lang_codes), 4)
     try:
-        for lang in lang_codes:
-            print(f"[INFO] Translating highlight language (sequential): {lang}", file=sys.stderr)
-            outcome = translate_language_scenes(
-                lang,
-                english_texts,
-                cache=trans_cache,
-                term_log=term_log,
-                google_circuit=google_breaker,
-            )
-            translations[lang] = outcome
-            if lang != "en" and outcome.scene_results:
-                _save_translations_json(lang, job_output_dir, outcome.scene_results)
-            if not outcome.ok:
-                msg = outcome.message or f"Translation failed for {lang}"
-                if outcome.failure_kind == "rate_limit":
-                    msg = f"Google rate limit — try again later. ({msg})"
-                _write_lang_failure(
-                    job_output_dir,
+        with ThreadPoolExecutor(max_workers=max(translate_workers, 1)) as pool:
+            futures = {
+                pool.submit(
+                    _translate_highlight_language,
                     lang,
-                    msg,
-                    failure_kind=outcome.failure_kind,
-                    translation_seconds=outcome.translation_seconds,
-                    translator_backend=outcome.translator_backend,
-                )
-                print(f"[WARN] Translation failed for {lang}: {msg}", file=sys.stderr)
+                    english_texts,
+                    trans_cache=trans_cache,
+                    term_log=term_log,
+                    google_breaker=google_breaker,
+                ): lang
+                for lang in lang_codes
+            }
+            for fut in as_completed(futures):
+                lang, outcome = fut.result()
+                translations[lang] = outcome
+                if lang != "en" and outcome.scene_results:
+                    _save_translations_json(lang, job_output_dir, outcome.scene_results)
+                if not outcome.ok:
+                    msg = outcome.message or f"Translation failed for {lang}"
+                    if outcome.failure_kind == "rate_limit":
+                        msg = f"Google rate limit — try again later. ({msg})"
+                    _write_lang_failure(
+                        job_output_dir,
+                        lang,
+                        msg,
+                        failure_kind=outcome.failure_kind,
+                        translation_seconds=outcome.translation_seconds,
+                        translator_backend=outcome.translator_backend,
+                    )
+                    print(f"[WARN] Translation failed for {lang}: {msg}", file=sys.stderr)
     finally:
         reset_google_circuit_breaker(breaker_token)
 
-    # Phase 2: TTS + render in parallel (only languages with full spoken text)
+    en_spoken = english_texts
+    if translations.get("en") and translations["en"].ok and translations["en"].spoken_texts:
+        en_spoken = [str(s) for s in translations["en"].spoken_texts if s]
+    if any(o.ok and o.spoken_texts for o in translations.values()):
+        print("[INFO] Building shared highlight scene visuals (one video track for all languages)", file=sys.stderr)
+        ensure_shared_scene_visuals(
+            job_output_dir,
+            visuals,
+            en_spoken,
+            rebuild=rebuild_shared,
+        )
+
+    # Phase 2: TTS + mux per language (shared visuals; audio + captions only)
     render_queue: dict[str, list[str]] = {}
     for lang, outcome in translations.items():
         if outcome.ok and all(outcome.spoken_texts):

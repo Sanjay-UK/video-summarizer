@@ -30,111 +30,151 @@ const SUBTASK_NAMES = {
 let highlightRequested = false;
 
 function toggleHighlightLangPanel() {
- const panel = document.getElementById('highlightLangPanel');
- const on = document.getElementById('highlightVideo')?.checked === true;
- if (panel) {
- panel.style.display = on ? 'block' : 'none';
- }
+ /* Language panel stays visible for summary + optional highlight video. */
 }
 
-function getSelectedHighlightLanguages() {
- if (!document.getElementById('highlightVideo')?.checked) {
- return [];
- }
+function getSelectedOutputLanguages() {
  const boxes = document.querySelectorAll('input[name="highlight_languages"]:checked');
  let langs = Array.from(boxes).map((b) => b.value);
- if (!langs.includes('en')) {
- langs.unshift('en');
- }
  if (langs.length === 0) {
  langs = ['en'];
  }
+ if (!langs.includes('en')) {
+ langs.unshift('en');
+ }
  return langs;
+}
+
+function getSelectedHighlightLanguages() {
+ return getSelectedOutputLanguages();
+}
+
+function shouldGenerateHighlightVideo() {
+ const checkbox = document.getElementById('highlightVideo');
+ const langs = getSelectedOutputLanguages();
+ return checkbox?.checked === true || langs.some((code) => code !== 'en');
+}
+
+let cachedResults = null;
+let selectedResultsLang = 'en';
+
+const SUPPORTED_RESULTS_LANGS = new Set(['en', 'hi', 'kn', 'te', 'ta']);
+
+function sanitizeSummaryMarkdown(text) {
+ if (!text) {
+ return '';
+ }
+ let t = text;
+ t = t.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => {
+ const cp = parseInt(hex, 16);
+ return Number.isFinite(cp) ? String.fromCharCode(cp) : _;
+ });
+ t = t.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+ t = t.replace(/(\S+)(?:\s+\1){5,}/gu, '$1 $1');
+ return t;
+}
+
+function renderMarkdownInto(el, text) {
+ if (!el) return;
+ marked.setOptions({ breaks: true, gfm: true });
+ el.innerHTML = marked.parse(sanitizeSummaryMarkdown(text || ''));
+ el.classList.add('markdown-body');
 }
 
 function highlightStreamUrl(jobId, langCode) {
  return `/stream/highlight/${jobId}/${langCode}`;
 }
 
-function playHighlightLang(langCode) {
- if (!currentJobId || !langCode) {
+function populateResultsLanguageSelect(results) {
+ const select = document.getElementById('resultsLangSelect');
+ const langs = results.output_languages || [{ code: 'en', name: 'English' }];
+ if (!select) {
  return;
  }
- const player = document.getElementById('highlightVideoPlayer');
- const select = document.getElementById('highlightLangSelect');
- if (select && select.value !== langCode) {
- select.value = langCode;
- }
- if (player) {
- player.src = highlightStreamUrl(currentJobId, langCode);
- player.load();
- }
-}
-
-function onHighlightLangSelectChange() {
- const select = document.getElementById('highlightLangSelect');
- if (select?.value) {
- playHighlightLang(select.value);
- }
-}
-
-function listenAudioUrl(jobId, optionValue) {
- if (!jobId || !optionValue) {
- return '';
- }
- if (optionValue === 'summary-en') {
- return `/download/audio/${jobId}`;
- }
- return highlightStreamUrl(jobId, optionValue);
-}
-
-function setupListenLanguageOptions(jobId, results) {
- const select = document.getElementById('listenLangSelect');
- if (!select || !jobId) {
- return;
- }
- const options = [{ value: 'summary-en', label: 'English — full summary' }];
- const statusRows = results.highlight_language_status || [];
- const langs = results.highlight_languages || [];
- const highlightCodes = new Set();
- for (const row of statusRows) {
- if (row.status === 'success' && row.download_available) {
- highlightCodes.add(row.code);
- }
- }
- for (const l of langs) {
- highlightCodes.add(l.code);
- }
- for (const code of highlightCodes) {
- const meta = langs.find((x) => x.code === code);
- const row = statusRows.find((x) => x.code === code);
- const name = meta?.name || row?.name || code;
- options.push({ value: code, label: `${name} — highlight narration` });
- }
- select.innerHTML = options
- .map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`)
+ select.innerHTML = langs
+ .map((l) => `<option value="${escapeHtml(l.code)}">${escapeHtml(l.name)}</option>`)
  .join('');
- loadListenAudio(jobId, select.value || 'summary-en');
+ selectedResultsLang = langs[0]?.code || 'en';
+ select.value = selectedResultsLang;
 }
 
-function loadListenAudio(jobId, optionValue) {
+function onResultsLanguageChange() {
+ const select = document.getElementById('resultsLangSelect');
+ selectedResultsLang = select?.value || 'en';
+ applyResultsLanguageView();
+}
+
+function summaryTextForLang(results, code) {
+ if (!SUPPORTED_RESULTS_LANGS.has(code)) {
+ code = 'en';
+ }
+ if (code === 'en') {
+ return results.summary || '';
+ }
+ const tr = results.summary_translations || {};
+ if (tr[code]) {
+ return tr[code];
+ }
+ const row = (results.summary_translation_status || []).find((r) => r.code === code);
+ if (row && row.status === 'failed') {
+ return `*Summary translation for ${row.name} failed:* ${row.message || ''}`;
+ }
+ return results.summary || '';
+}
+
+function applyResultsLanguageView() {
+ if (!cachedResults || !currentJobId) {
+ return;
+ }
+ const code = selectedResultsLang;
+ const results = cachedResults;
+
+ renderMarkdownInto(
+ document.getElementById('summaryContentDisplay'),
+ summaryTextForLang(results, code)
+ );
+
  const audioPlayer = document.getElementById('audioPlayer');
  const audioSource = document.getElementById('audioSource');
- if (!audioSource || !audioPlayer) {
- return;
+ if (audioSource && audioPlayer) {
+ if (code === 'en') {
+ audioSource.type = 'audio/mpeg';
+ audioSource.src = `/download/audio/${currentJobId}`;
+ } else {
+ audioSource.type = 'video/mp4';
+ audioSource.src = highlightStreamUrl(currentJobId, code);
  }
- const url = listenAudioUrl(jobId, optionValue);
- const isHighlight = optionValue && optionValue !== 'summary-en';
- audioSource.type = isHighlight ? 'video/mp4' : 'audio/mpeg';
- audioSource.src = url;
  audioPlayer.load();
+ }
+
+ const playerWrap = document.getElementById('highlightPlayerWrap');
+ const player = document.getElementById('highlightVideoPlayer');
+ const dlBtn = document.getElementById('highlightDownloadBtn');
+ const row = (results.highlight_language_status || []).find((r) => r.code === code);
+ const hasHighlight = row?.status === 'success' && row.download_available;
+ if (playerWrap && player) {
+ if (hasHighlight) {
+ playerWrap.style.display = 'block';
+ player.src = highlightStreamUrl(currentJobId, code);
+ player.load();
+ if (dlBtn) dlBtn.style.display = 'inline-block';
+ } else if (results.highlight_video) {
+ playerWrap.style.display = 'block';
+ player.removeAttribute('src');
+ if (dlBtn) dlBtn.style.display = 'none';
+ } else {
+ playerWrap.style.display = 'none';
+ if (dlBtn) dlBtn.style.display = 'none';
+ }
+ }
 }
 
-function onListenLangSelectChange() {
- const select = document.getElementById('listenLangSelect');
- if (currentJobId && select?.value) {
- loadListenAudio(currentJobId, select.value);
- }
+function initResultsPage(jobId, results) {
+ cachedResults = results;
+ currentJobId = jobId;
+ populateResultsLanguageSelect(results);
+ renderHighlightDownloads(jobId, results);
+ applyResultsLanguageView();
 }
 
 function renderHighlightDownloads(jobId, results) {
@@ -144,7 +184,6 @@ function renderHighlightDownloads(jobId, results) {
  const retryBtn = document.getElementById('highlightRetryBtn');
  const playerWrap = document.getElementById('highlightPlayerWrap');
  const player = document.getElementById('highlightVideoPlayer');
- const langSelect = document.getElementById('highlightLangSelect');
  if (!card || !list) {
  return;
  }
@@ -186,28 +225,13 @@ function renderHighlightDownloads(jobId, results) {
  .filter(Boolean)
  .join(' · ')
  : escapeHtml(row.message || 'Failed');
- const btn =
- ok && row.filename
- ? `<button type="button" class="btn btn-secondary" style="margin-left: 8px;" onclick="playHighlightLang('${escapeHtml(row.code)}')">Play</button>` +
- `<button type="button" class="btn btn-secondary" style="margin-left: 8px;" onclick="downloadHighlightLang('${escapeHtml(row.code)}')">Download</button>`
- : '';
- return `<div class="highlight-lang-row" style="margin: 8px 0; padding: 8px 10px; border-radius: 6px; background: ${ok ? 'rgba(46,125,50,0.12)' : 'rgba(198,40,40,0.1)'};"><strong>${label}</strong><div style="font-size: 0.9em; margin-top: 4px;">${detail}</div>${btn}</div>`;
+ return `<div class="highlight-lang-row" style="margin: 8px 0; padding: 8px 10px; border-radius: 6px; background: ${ok ? 'rgba(46,125,50,0.12)' : 'rgba(198,40,40,0.1)'};"><strong>${label}</strong><div style="font-size: 0.9em; margin-top: 4px;">${detail}</div></div>`;
  })
  .join('');
  } else if (statusList) {
  statusList.innerHTML = '';
  }
  list.innerHTML = '';
-
- if (playerWrap && langSelect && langs.length > 0 && jobId) {
- langSelect.innerHTML = langs
- .map((l) => `<option value="${escapeHtml(l.code)}">${escapeHtml(l.name)}</option>`)
- .join('');
- playerWrap.style.display = 'block';
- playHighlightLang(langs[0].code);
- } else if (playerWrap) {
- playerWrap.style.display = 'none';
- }
 
  const anyFailed = statusRows.some((r) => r.status === 'failed');
  if (retryBtn) {
@@ -234,12 +258,13 @@ async function retryFailedHighlightLanguages() {
  if (!resp.ok) {
  throw new Error(data.error || 'Retry failed');
  }
- const results = {
+ cachedResults = {
+ ...cachedResults,
  highlight_video: data.highlight_video,
  highlight_languages: data.highlight_languages || [],
  highlight_language_status: data.highlight_language_status || [],
  };
- renderHighlightDownloads(currentJobId, results);
+ initResultsPage(currentJobId, cachedResults);
  } catch (e) {
  alert(e.message || String(e));
  } finally {
@@ -345,7 +370,7 @@ function initializeDragDrop() {
 async function startSummarization() {
  const model = document.querySelector('input[name="model"]:checked').value;
  const compression = document.querySelector('input[name="compression"]:checked').value;
- highlightRequested = document.getElementById('highlightVideo')?.checked === true;
+ highlightRequested = shouldGenerateHighlightVideo();
  let source = null;
 
  if (currentTab === 'url') {
@@ -371,18 +396,22 @@ async function startSummarization() {
  document.getElementById('errorSection').style.display = 'none';
  document.getElementById('progressSection').style.display = 'block';
 
- // Reset progress UI
+ // Reset progress UI (job ID is set after /summarize returns, then kept via syncProgressJobIdDisplay)
  resetProgressUI();
+ const progressJobEl = document.getElementById('progressJobId');
+ if (progressJobEl) {
+ progressJobEl.textContent = '';
+ }
 
  try {
  const formData = new FormData();
  formData.append('model', model);
  formData.append('compression', compression);
- if (highlightRequested) {
- formData.append('highlight_video', '1');
- getSelectedHighlightLanguages().forEach((lang) => {
+ getSelectedOutputLanguages().forEach((lang) => {
  formData.append('highlight_languages', lang);
  });
+ if (highlightRequested) {
+ formData.append('highlight_video', '1');
  }
 
  const highlightSubtask = document.getElementById('subtask-highlight');
@@ -409,12 +438,20 @@ async function startSummarization() {
  const data = await response.json();
  currentJobId = data.job_id;
  console.log('[APP] Job started:', currentJobId);
+ syncProgressJobIdDisplay();
 
  // Start polling for progress
  startProgressPolling();
  } catch (error) {
  console.error('[APP] Error:', error);
  showError(error.message);
+ }
+}
+
+function syncProgressJobIdDisplay() {
+ const progressJobEl = document.getElementById('progressJobId');
+ if (progressJobEl && currentJobId) {
+ progressJobEl.textContent = `Job ID: ${currentJobId}`;
  }
 }
 
@@ -473,6 +510,8 @@ function startProgressPolling() {
 function updateProgressUI(data) {
  const { progress, current_step, status, log_lines } = data;
 
+ syncProgressJobIdDisplay();
+
  // Update overall progress
  const percent = Math.round(progress * 100);
  document.getElementById('progressFill').style.width = percent + '%';
@@ -530,24 +569,7 @@ async function showResults(data) {
  const results = await response.json();
  console.log('[RESULTS]', results);
 
- // Display summary with markdown rendering
- const summaryContainer = document.getElementById('summaryContent');
- const summaryText = results.summary || 'No summary available';
-
- // Configure marked for safe rendering
- marked.setOptions({
- breaks: true,
- gfm: true,
- });
-
- // Render markdown to HTML
- const htmlContent = marked.parse(summaryText);
- summaryContainer.innerHTML = htmlContent;
- summaryContainer.classList.add('markdown-body');
-
- console.log('[SUMMARY] Rendered markdown:', summaryText.substring(0, 100) + '...');
-
- setupListenLanguageOptions(currentJobId, results);
+ initResultsPage(currentJobId, results);
 
  // Calculate stats
  const origLength = (results.transcript_length || 0);
@@ -558,7 +580,6 @@ async function showResults(data) {
  document.getElementById('summaryLength').textContent = `${Math.round(summLength / 100) / 10}k chars`;
  document.getElementById('compression').textContent = `${compression}%`;
 
- renderHighlightDownloads(currentJobId, results);
  } catch (error) {
  console.error('[RESULTS ERROR]', error);
  }
@@ -597,22 +618,32 @@ function goToDashboard() {
 }
 
 function downloadSummary() {
- if (currentJobId) {
- window.location.href = `/download/summary/${currentJobId}`;
+ if (!currentJobId) {
+ return;
  }
+ const lang = selectedResultsLang || 'en';
+ window.location.href =
+ lang === 'en'
+ ? `/download/summary/${currentJobId}`
+ : `/download/summary/${currentJobId}/${lang}`;
 }
 
 function downloadListenAudio() {
  if (!currentJobId) {
  return;
  }
- const select = document.getElementById('listenLangSelect');
- const value = select?.value || 'summary-en';
- if (value === 'summary-en') {
+ if (selectedResultsLang === 'en') {
  window.location.href = `/download/audio/${currentJobId}`;
  return;
  }
- downloadHighlightLang(value);
+ downloadHighlightForResultsLang();
+}
+
+function downloadHighlightForResultsLang() {
+ if (!currentJobId || !selectedResultsLang) {
+ return;
+ }
+ downloadHighlightLang(selectedResultsLang);
 }
 
 function downloadSubtitles() {
@@ -704,22 +735,7 @@ function loadJobResults(jobId, updateUrl = true) {
  .then(results => {
  console.log('[LOAD JOB] Results received:', results);
 
- // Display summary with markdown rendering
- const summaryContainer = document.getElementById('summaryContent');
- const summaryText = results.summary || 'No summary available';
-
- // Configure marked for safe rendering
- marked.setOptions({
- breaks: true,
- gfm: true,
- });
-
- // Render markdown to HTML
- const htmlContent = marked.parse(summaryText);
- summaryContainer.innerHTML = htmlContent;
- summaryContainer.classList.add('markdown-body');
-
- setupListenLanguageOptions(jobId, results);
+ initResultsPage(jobId, results);
 
  // Update stats
  const origLength = (results.transcript_length || 0);
@@ -730,13 +746,14 @@ function loadJobResults(jobId, updateUrl = true) {
  document.getElementById('summaryLength').textContent = `${Math.round(summLength / 100) / 10}k chars`;
  document.getElementById('compression').textContent = `${compression}%`;
 
- renderHighlightDownloads(jobId, results);
-
  console.log('[LOAD JOB] Summary loaded successfully');
  })
  .catch(e => {
  console.error('[LOAD RESULTS ERROR]', e);
- document.getElementById('summaryContent').innerHTML = '<p style="color: red;">Error loading summary. Please try again.</p>';
+ const el = document.getElementById('summaryContentDisplay');
+ if (el) {
+ el.innerHTML = '<p style="color: red;">Error loading summary. Please try again.</p>';
+ }
  });
 }
 

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from config import HIGHLIGHT_EXTRA_PROTECTED_TERMS
 from src.locales import LocaleSpec
 from src.simple_indic_translit import try_transliterate
+from src.translation_quality import clean_translation_text, translation_passes_quality
 
 _EN_STOPWORDS = frozenset(
     """
@@ -43,6 +44,24 @@ _CAP_WORD = re.compile(r"\b[A-Z][a-z]{2,}\b")
 _ACRONYM = re.compile(r"\b[A-Z]{2,}\b")
 _NUMERIC = re.compile(r"\d+(?:\.\d+)?")
 _TOKEN_SPLIT = re.compile(r"(\d+(?:\.\d+)?|[A-Za-z][A-Za-z'-]*|.)", re.UNICODE)
+# Python identifiers only — not English words like "in", "for", "is" (avoids over-matching prose).
+_CODE_KEYWORDS = frozenset(
+    {
+        "print",
+        "def",
+        "class",
+        "import",
+        "return",
+        "lambda",
+        "pass",
+        "break",
+        "continue",
+        "true",
+        "false",
+        "none",
+    }
+)
+_INLINE_CODE_SEGMENT = re.compile(r"`[^`]+`")
 
 
 @dataclass(frozen=True)
@@ -55,16 +74,22 @@ class TermDecision:
         return {"source": self.source, "action": self.action, "output": self.output}
 
 
+def _prose_outside_inline_code(text: str) -> str:
+    """Drop markdown inline code so term extraction does not treat code as terms."""
+    return _INLINE_CODE_SEGMENT.sub(" ", text)
+
+
 def extract_protected_terms(english_text: str) -> list[str]:
     found: set[str] = set()
+    prose = _prose_outside_inline_code(english_text)
     for pat in (_CAP_WORD, _ACRONYM):
-        for m in pat.finditer(english_text):
+        for m in pat.finditer(prose):
             word = m.group(0)
             if word.lower() in _EN_STOPWORDS:
                 continue
             found.add(word)
 
-    for m in _LATIN_WORD.finditer(english_text):
+    for m in _LATIN_WORD.finditer(prose):
         word = m.group(0)
         low = word.lower()
         if low in _DEFAULT_LOANWORDS or low in HIGHLIGHT_EXTRA_PROTECTED_TERMS:
@@ -81,11 +106,46 @@ def extract_protected_terms(english_text: str) -> list[str]:
     return sorted(found, key=lambda t: (-len(t), t.lower()))
 
 
+def split_prose_and_english_code(text: str) -> list[tuple[str, str]]:
+    """Split into ('prose'|'code', segment); only markdown inline `code` is preserved verbatim."""
+    parts: list[tuple[str, str]] = []
+    last = 0
+    for match in _INLINE_CODE_SEGMENT.finditer(text):
+        if match.start() > last:
+            parts.append(("prose", text[last : match.start()]))
+        parts.append(("code", match.group(0)))
+        last = match.end()
+    if last < len(text):
+        parts.append(("prose", text[last:]))
+    if not parts:
+        parts.append(("prose", text))
+    return parts
+
+
+def translate_text_preserving_english_code(
+    english_text: str,
+    translate_prose: Callable[[str], str],
+) -> str:
+    """Translate only prose; leave markdown code spans and print(...) in English."""
+    pieces: list[str] = []
+    for kind, segment in split_prose_and_english_code(english_text):
+        if kind == "code":
+            pieces.append(segment)
+            continue
+        if not segment.strip():
+            pieces.append(segment)
+            continue
+        pieces.append(translate_prose(segment))
+    return "".join(pieces)
+
+
 def resolve_latin_term(term: str, locale: LocaleSpec) -> TermDecision:
     if locale.code == "en":
         return TermDecision(term, "kept_as_is", term)
     if _NUMERIC.fullmatch(term):
         return TermDecision(term, "kept_as_is", term)
+    if term.lower() in _CODE_KEYWORDS:
+        return TermDecision(term, "kept_original", term)
 
     out, ok = try_transliterate(term, locale.code)
     if ok:
@@ -118,28 +178,39 @@ def build_term_map_with_log(
 
 
 def apply_term_map_to_translation(text: str, term_map: dict[str, str]) -> str:
-    if not text:
+    if not text or not term_map:
         return text
 
-    out = text
-    for latin_key in sorted(term_map.keys(), key=len, reverse=True):
-        script_form = term_map[latin_key]
-        if not script_form:
+    if "`" not in text:
+        out = text
+        for latin_key in sorted(term_map.keys(), key=len, reverse=True):
+            script_form = term_map[latin_key]
+            if not script_form:
+                continue
+            out = re.compile(re.escape(latin_key), re.IGNORECASE).sub(script_form, out)
+        return out
+
+    merged: list[str] = []
+    for kind, segment in split_prose_and_english_code(text):
+        if kind == "code":
+            merged.append(segment)
             continue
-        out = re.compile(re.escape(latin_key), re.IGNORECASE).sub(script_form, out)
-    return out
+        seg_out = segment
+        for latin_key in sorted(term_map.keys(), key=len, reverse=True):
+            script_form = term_map[latin_key]
+            if not script_form:
+                continue
+            seg_out = re.compile(re.escape(latin_key), re.IGNORECASE).sub(script_form, seg_out)
+        merged.append(seg_out)
+    return "".join(merged)
 
 
-def normalize_stray_latin_with_log(
+def _normalize_prose_latin(
     text: str,
     locale: LocaleSpec,
     term_map: dict[str, str],
     logged_sources: set[str],
 ) -> tuple[str, list[TermDecision]]:
-    """Replace stray Latin words; never remove tokens. Digits/versions unchanged."""
-    if locale.code == "en":
-        return text, []
-
     extra: list[TermDecision] = []
     pieces: list[str] = []
 
@@ -152,6 +223,9 @@ def normalize_stray_latin_with_log(
             continue
         if _LATIN_WORD.fullmatch(part):
             key = part.lower()
+            if key in _CODE_KEYWORDS:
+                pieces.append(part)
+                continue
             if key in term_map:
                 pieces.append(term_map[key])
                 continue
@@ -166,6 +240,48 @@ def normalize_stray_latin_with_log(
     return "".join(pieces), extra
 
 
+def normalize_stray_latin_with_log(
+    text: str,
+    locale: LocaleSpec,
+    term_map: dict[str, str],
+    logged_sources: set[str],
+) -> tuple[str, list[TermDecision]]:
+    """Replace stray Latin words; never remove tokens. Digits/versions unchanged."""
+    if locale.code == "en":
+        return text, []
+
+    if "`" not in text:
+        return _normalize_prose_latin(text, locale, term_map, logged_sources)
+
+    extra: list[TermDecision] = []
+    merged: list[str] = []
+    for kind, segment in split_prose_and_english_code(text):
+        if kind == "code":
+            merged.append(segment)
+            continue
+        seg_out, seg_extra = _normalize_prose_latin(segment, locale, term_map, logged_sources)
+        merged.append(seg_out)
+        extra.extend(seg_extra)
+    return "".join(merged), extra
+
+
+def restore_inline_code_from_english(source_en: str, translated: str) -> str:
+    """Re-insert any `...` spans from English if the model dropped or mangled them."""
+    codes = _INLINE_CODE_SEGMENT.findall(source_en)
+    if not codes:
+        return translated
+    out = translated
+    for code in codes:
+        if code in out:
+            continue
+        inner = code[1:-1]
+        if inner and inner in out:
+            out = out.replace(inner, code, 1)
+            continue
+        out = out + (" " if out and not out.endswith("\n") else "") + code
+    return out
+
+
 def finalize_indic_translation_with_log(
     english_text: str,
     translated: str,
@@ -175,6 +291,11 @@ def finalize_indic_translation_with_log(
     logged = {d.source.lower() for d in decisions}
     text = apply_term_map_to_translation(translated, term_map)
     text, stray = normalize_stray_latin_with_log(text, locale, term_map, logged)
+    text = restore_inline_code_from_english(english_text, text)
+    text = clean_translation_text(text, locale)
+    ok, reason = translation_passes_quality(text, locale)
+    if not ok:
+        raise ValueError(f"translation quality check failed: {reason}")
     all_decisions = decisions + stray
     return text.strip(), [d.to_dict() for d in all_decisions]
 
@@ -204,7 +325,11 @@ class TermProtectedTranslator:
     def translate(self, english_text: str, locale: LocaleSpec, *, scene_index: int) -> str:
         if locale.code == "en":
             return english_text.strip()
-        raw = self.inner.translate(english_text, locale, scene_index=scene_index)
+
+        def _translate_prose(segment: str) -> str:
+            return self.inner.translate(segment, locale, scene_index=scene_index)
+
+        raw = translate_text_preserving_english_code(english_text, _translate_prose)
         text, term_entries = finalize_indic_translation_with_log(english_text, raw, locale)
         if self.term_log is not None:
             self.term_log.record_scene(

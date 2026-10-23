@@ -241,20 +241,15 @@ def mux_scene(
     return output_path
 
 
-def build_scene_video(
+def build_scene_visual_only(
     visual: VisualSelection,
-    narration_audio: Path,
-    ass_path: Path,
-    narration_duration: float,
+    display_duration: float,
     work_dir: Path,
+    output_path: Path,
 ) -> Path:
-    display_duration = scene_display_duration(narration_duration)
+    """Muted scene video (shared across all highlight languages)."""
     work_dir.mkdir(parents=True, exist_ok=True)
     tag = f"scene_{visual.scene_index:03d}"
-
-    padded_audio = work_dir / f"{tag}_audio.aac"
-    pad_narration_audio(narration_audio, display_duration, padded_audio)
-
     mode: VisualMode = visual.mode  # type: ignore[assignment]
     if mode == "clip":
         visual_video = _build_clip_plus_freeze(visual.visual_path, display_duration, work_dir, tag)
@@ -265,9 +260,32 @@ def build_scene_video(
             work_dir,
             tag,
         )
+    if visual_video.resolve() != output_path.resolve():
+        shutil.copy2(visual_video, output_path)
+    return output_path
+
+
+def build_scene_video(
+    visual: VisualSelection,
+    narration_audio: Path,
+    ass_path: Path,
+    narration_duration: float,
+    work_dir: Path,
+    *,
+    display_duration: float | None = None,
+) -> Path:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    tag = f"scene_{visual.scene_index:03d}"
+    dur = display_duration if display_duration is not None else scene_display_duration(narration_duration)
+
+    padded_audio = work_dir / f"{tag}_audio.aac"
+    pad_narration_audio(narration_audio, dur, padded_audio)
+
+    visual_out = work_dir / f"{tag}_visual.mp4"
+    build_scene_visual_only(visual, dur, work_dir, visual_out)
 
     scene_out = work_dir / f"{tag}_final.mp4"
-    return mux_scene(visual_video, padded_audio, ass_path, display_duration, scene_out)
+    return mux_scene(visual_out, padded_audio, ass_path, dur, scene_out)
 
 
 def concat_scenes(scene_paths: list[Path], output_path: Path) -> Path:
