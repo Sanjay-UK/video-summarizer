@@ -3,7 +3,7 @@
 import json
 import sys
 from pathlib import Path
-from config import OUTPUT_DIR, SUBTITLE_GEN_DIR, WHISPER_MODEL
+from config import OUTPUT_DIR, SUBTITLE_GEN_DIR, WHISPER_DEVICE, WHISPER_MODEL
 
 sys.path.insert(0, str(SUBTITLE_GEN_DIR))
 
@@ -82,7 +82,7 @@ def correct_transcript(segments):
     
     return segments, corrections_made, uncertain_found
 
-def transcribe_audio(audio_path, model=None, output_dir=None):
+def transcribe_audio(audio_path, model=None, output_dir=None, device=None):
     """Transcribe audio using faster-whisper."""
     audio_path = Path(audio_path)
     if not audio_path.exists():
@@ -101,7 +101,8 @@ def transcribe_audio(audio_path, model=None, output_dir=None):
     print(f"[INFO] Transcribing with faster-whisper model: {model}")
     print(f"[INFO] Loading model...")
     
-    whisper_model = WhisperModel(model, device="cpu", compute_type="auto")
+    whisper_device = device or WHISPER_DEVICE or "cpu"
+    whisper_model = WhisperModel(model, device=whisper_device, compute_type="auto")
     
     try:
         terms_dict = load_terms()

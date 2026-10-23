@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPU &amp; CPU Selection — VideoSummarize</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <style>
+    .gpu-page { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+    .gpu-page h1 { margin-bottom: 8px; }
+    .gpu-page h2.section-title { margin: 32px 0 12px; font-size: 1.35rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }
+    .gpu-page h3 { margin: 0 0 12px; font-size: 1.05rem; }
+    .gpu-meta { color: #666; font-size: 0.95rem; margin-bottom: 24px; }
+    .gpu-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+    .gpu-card.recommended { border-color: #22c55e; box-shadow: 0 0 0 1px #22c55e33; }
+    .gpu-card.saved { border-color: #2563eb; background: #f8fafc; }
+    .gpu-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    .gpu-table th, .gpu-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; vertical-align: middle; }
+    .gpu-table th { color: #64748b; font-weight: 600; }
+    .gpu-table tr.is-saved { background: #eff6ff; }
+    .gpu-table tr.selectable-row { cursor: pointer; }
+    .gpu-table tr.selectable-row:hover { background: #f1f5f9; }
+    .gpu-actions { margin: 16px 0; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .gpu-actions a, .gpu-actions button {
+      padding: 10px 16px; border-radius: 8px; border: 1px solid #cbd5e1;
+      background: #f8fafc; cursor: pointer; text-decoration: none; color: #0f172a;
+    }
+    .gpu-actions button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    .gpu-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .gpu-error { color: #b91c1c; margin-bottom: 8px; }
+    .gpu-success { color: #15803d; margin-bottom: 8px; }
+    #deployMessage { min-height: 1.2em; font-size: 0.95rem; }
+    .pick-rec-btn {
+      padding: 6px 12px; border-radius: 6px; border: 1px solid #2563eb;
+      background: #fff; color: #2563eb; cursor: pointer; font-size: 0.85rem;
+    }
+    .pick-rec-btn:hover { background: #eff6ff; }
+    .rec-top { font-size: 1.05rem; margin: 0 0 8px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <nav class="navbar">
+      <div class="container">
+        <div class="navbar-brand">
+          <a href="/" style="text-decoration:none;color:inherit;"><h2>VideoSummarize</h2></a>
+          <span class="tagline">GPU &amp; CPU selection</span>
+        </div>
+      </div>
+    </nav>
+    <div id="deployStatusMount">
+    {% include 'partials/compute_deploy_status.html' %}
+    </div>
+    <main class="gpu-page">
+      <h1>Cloud compute selection</h1>
+      <p class="gpu-meta">
+        Choose <strong>one</strong> row from either list (GPU or CPU). Save records your choice in
+        <code>data/compute_selection.json</code> and starts deploy (RunPod pod create, or AWS manual instructions).
+      </p>
+      <div class="gpu-actions">
+        <button type="button" onclick="location.reload()">Refresh catalog</button>
+        <a href="/">Back to summarizer</a>
+        <a href="/api/gpu-selection" target="_blank" rel="noopener">JSON API</a>
+      </div>
+      {% for err in report.errors %}
+      <p class="gpu-error">{{ err }}</p>
+      {% endfor %}
+
+      {% if report.saved_selection and report.saved_selection.offer %}
+      <section class="gpu-card saved">
+        <h3>Currently selected</h3>
+        {% set s = report.saved_selection.offer %}
+        <p>
+          <strong>{{ s.name }}</strong> ({{ s.kind|upper }}) — {{ s.cloud }}
+          — ${{ "%.3f"|format(s.price_per_hour) }}/hr
+          {% if s.vram_gb %} — {{ s.vram_gb }} GB VRAM{% endif %}
+          {% if s.vcpus %} — {{ s.vcpus }} vCPU{% endif %}
+        </p>
+        {% if report.deploy_status %}
+        <p class="gpu-meta">
+          Deploy: <strong>{{ report.deploy_status.status }}</strong>
+          — {{ report.deploy_status.message }}
+          {% if report.deploy_status.pod_id %} — Pod ID: {{ report.deploy_status.pod_id }}{% endif %}
+        </p>
+        {% endif %}
+        <p class="gpu-meta">Saved at {{ report.saved_selection.saved_at }}</p>
+      </section>
+      {% endif %}
+
+      {% if report.recommendations %}
+      <section class="gpu-card recommended">
+        <h3>Recommendations by category</h3>
+        <p class="gpu-meta" style="margin-bottom:12px;">
+          <strong>Approach:</strong> rule-based only (no LLM). Uses live catalog fields plus
+          <code>WHISPER_MODEL</code> / <code>SUMMARIZATION_MODEL</code> from config to explain each category.
+          Click <strong>Select</strong> to check a suggestion against the lists below.
+        </p>
+        {% set primary = report.recommendations.recommended_gpu_for_pipeline %}
+        {% if primary %}
+        <p class="rec-top">
+          Top pick for this app: <strong>{{ primary.name }}</strong>
+          ({{ primary.cloud }}, {{ primary.vram_gb }} GB, ${{ "%.3f"|format(primary.price_per_hour) }}/hr)
+          <button type="button" class="pick-rec-btn" data-selection-id="{{ primary.selection_id }}" data-offer="{{ primary | tojson | forceescape }}">Select top pick</button>
+        </p>
+        {% endif %}
+        <table class="gpu-table">
+          <thead>
+            <tr><th>Category</th><th>Suggested hardware</th><th>$/hr</th><th>Check</th></tr>
+          </thead>
+          <tbody>
+          {% for cat in report.recommendations.categories %}
+            <tr>
+              <td>
+                <strong>{{ cat.title }}</strong>
+                <div class="gpu-meta" style="margin:4px 0 0;">{{ cat.description }}</div>
+              </td>
+              <td>
+                {% if cat.pick %}
+                  {{ cat.pick.name }} · {{ cat.pick.cloud }}
+                  {% if cat.pick.vram_gb %} · {{ cat.pick.vram_gb }} GB VRAM{% endif %}
+                  {% if cat.pick.vcpus %} · {{ cat.pick.vcpus }} vCPU{% endif %}
+                {% else %}
+                  <span class="gpu-meta">No match in current stock</span>
+                {% endif %}
+              </td>
+              <td>{% if cat.pick %}${{ "%.3f"|format(cat.pick.price_per_hour) }}{% else %}—{% endif %}</td>
+              <td>
+                {% if cat.pick %}
+                <button type="button" class="pick-rec-btn" data-selection-id="{{ cat.pick.selection_id }}" data-offer="{{ cat.pick | tojson | forceescape }}">Select</button>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </section>
+      {% endif %}
+
+      <form id="computeSelectForm">
+        <div class="gpu-actions">
+          <button type="submit" class="primary" id="saveDeployBtn">Save selection &amp; deploy</button>
+          <span id="deployMessage" class="gpu-meta" role="status"></span>
+        </div>
+
+        <h2 class="section-title">Available GPUs</h2>
+        {% set gpu_sections = [
+          ('runpod-community', 'RunPod Community Cloud'),
+          ('runpod-secure', 'RunPod Secure Cloud'),
+          ('aws-on-demand', 'AWS EC2 GPU instances (on-demand)'),
+        ] %}
+        {% for key, title in gpu_sections %}
+        {% set rows = report.gpus_by_cloud.get(key, []) %}
+        {% if rows %}
+        <section class="gpu-card">
+          <h3>{{ title }}</h3>
+          <table class="gpu-table">
+            <thead>
+              <tr><th></th><th>Name</th><th>VRAM</th><th>Price / hour</th><th>Availability</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+            {% for g in rows %}
+              <tr class="selectable-row{% if report.saved_selection_id == g.selection_id %} is-saved{% endif %}"
+                  data-selection-id="{{ g.selection_id }}" data-offer="{{ g | tojson | forceescape }}">
+                <td>
+                  <input type="radio" name="selection_id" value="{{ g.selection_id }}"
+                    {% if report.saved_selection_id == g.selection_id %}checked{% endif %}
+                    aria-label="Select {{ g.name }}">
+                </td>
+                <td>{{ g.name }}</td>
+                <td>{% if g.vram_gb %}{{ g.vram_gb }} GB{% else %}—{% endif %}</td>
+                <td>${{ "%.3f"|format(g.price_per_hour) }}</td>
+                <td>{{ g.availability }}</td>
+                <td class="gpu-meta">{{ g.notes or g.resource_id }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </section>
+        {% endif %}
+        {% endfor %}
+
+        <h2 class="section-title">Available CPUs</h2>
+        {% set cpu_sections = [
+          ('runpod-cpu-secure', 'RunPod CPU-only pods (Secure)'),
+          ('aws-on-demand', 'AWS EC2 CPU-only instances (on-demand)'),
+        ] %}
+        {% for key, title in cpu_sections %}
+        {% set rows = report.cpus_by_cloud.get(key, []) %}
+        {% if rows %}
+        <section class="gpu-card">
+          <h3>{{ title }}</h3>
+          <table class="gpu-table">
+            <thead>
+              <tr><th></th><th>Name</th><th>vCPUs</th><th>Price / hour</th><th>Availability</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+            {% for c in rows %}
+              <tr class="selectable-row{% if report.saved_selection_id == c.selection_id %} is-saved{% endif %}"
+                  data-selection-id="{{ c.selection_id }}" data-offer="{{ c | tojson | forceescape }}">
+                <td>
+                  <input type="radio" name="selection_id" value="{{ c.selection_id }}"
+                    {% if report.saved_selection_id == c.selection_id %}checked{% endif %}
+                    aria-label="Select {{ c.name }}">
+                </td>
+                <td>{{ c.name }}</td>
+                <td>
+                  {% if c.vcpu_min and c.vcpu_max and c.vcpu_min != c.vcpu_max %}
+                    {{ c.vcpu_min }}–{{ c.vcpu_max }} (listed at {{ c.vcpus }})
+                  {% elif c.vcpus %}
+                    {{ c.vcpus }}
+                  {% else %}—{% endif %}
+                </td>
+                <td>
+                  ${{ "%.3f"|format(c.price_per_hour) }}
+                  {% if c.price_per_vcpu %}
+                    <span class="gpu-meta">(${{ "%.3f"|format(c.price_per_vcpu) }}/vCPU)</span>
+                  {% endif %}
+                </td>
+                <td>{{ c.availability }}</td>
+                <td class="gpu-meta">{{ c.notes }}{% if c.memory_gb %} · {{ c.memory_gb }} GB RAM{% endif %}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </section>
+        {% endif %}
+        {% endfor %}
+      </form>
+
+      <p class="gpu-meta">Last updated: {{ report.fetched_at }}</p>
+    </main>
+  </div>
+  <script src="{{ url_for('static', filename='js/deploy_status.js') }}"></script>
+  <script>
+    (function () {
+      const form = document.getElementById("computeSelectForm");
+      const msg = document.getElementById("deployMessage");
+      const saveBtn = document.getElementById("saveDeployBtn");
+
+      let recFallbackRadio = null;
+
+      function selectById(selectionId, offerJson) {
+        const radios = form.querySelectorAll('input[name="selection_id"]');
+        for (let i = 0; i < radios.length; i++) {
+          if (radios[i].value === selectionId) {
+            radios[i].checked = true;
+            if (recFallbackRadio) recFallbackRadio.checked = false;
+            radios[i].closest("tr")?.scrollIntoView({ behavior: "smooth", block: "center" });
+            return;
+          }
+        }
+        if (!recFallbackRadio) {
+          recFallbackRadio = document.createElement("input");
+          recFallbackRadio.type = "radio";
+          recFallbackRadio.name = "selection_id";
+          recFallbackRadio.style.display = "none";
+          form.appendChild(recFallbackRadio);
+        }
+        recFallbackRadio.value = selectionId;
+        recFallbackRadio.checked = true;
+        if (offerJson) recFallbackRadio.dataset.offer = offerJson;
+      }
+
+      function offerJsonForPicked(picked) {
+        const row = picked.closest("tr.selectable-row");
+        if (row && row.dataset.offer) return row.dataset.offer;
+        if (picked.dataset && picked.dataset.offer) return picked.dataset.offer;
+        return null;
+      }
+
+      document.querySelectorAll("tr.selectable-row").forEach(function (row) {
+        row.addEventListener("click", function (ev) {
+          if (ev.target.tagName === "INPUT") return;
+          const radio = row.querySelector('input[type="radio"]');
+          if (radio) radio.checked = true;
+        });
+      });
+
+      document.querySelectorAll(".pick-rec-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          selectById(btn.getAttribute("data-selection-id"), btn.getAttribute("data-offer"));
+        });
+      });
+
+      form.addEventListener("submit", async function (ev) {
+        ev.preventDefault();
+        const picked = form.querySelector('input[name="selection_id"]:checked');
+        if (!picked) {
+          msg.textContent = "Pick one GPU or CPU row first.";
+          msg.className = "gpu-error";
+          return;
+        }
+        saveBtn.disabled = true;
+        msg.textContent = "Saving and starting deploy…";
+        msg.className = "gpu-meta";
+        let offer = null;
+        const offerJson = offerJsonForPicked(picked);
+        if (offerJson) {
+          try { offer = JSON.parse(offerJson); } catch (e) { offer = null; }
+        }
+        try {
+          const res = await fetch("/api/gpu-selection", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ selection_id: picked.value, offer: offer }),
+          });
+          const data = await res.json();
+          if (data.ok) {
+            msg.textContent = data.deploy?.message || "Saved.";
+            msg.className = "gpu-success";
+            if (window.DeployStatusUI) {
+              window.DeployStatusUI.startDeployStatusPolling(data.deploy_status);
+            }
+            if (window.history && window.history.replaceState) {
+              window.history.replaceState({}, "", "/gpu-selection?deploy=ok");
+            }
+          } else {
+            msg.textContent = data.error || data.deploy?.message || "Deploy failed.";
+            msg.className = "gpu-error";
+          }
+        } catch (err) {
+          msg.textContent = String(err);
+          msg.className = "gpu-error";
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+
+      if (window.DeployStatusUI) {
+        window.DeployStatusUI.wireDeployStatusButtons();
+        var params = new URLSearchParams(window.location.search);
+        if (params.get("deploy") === "ok" && !document.getElementById("computeDeployStatus")) {
+          window.DeployStatusUI.startDeployStatusPolling(null);
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

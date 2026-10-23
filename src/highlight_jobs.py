@@ -107,13 +107,37 @@ def list_highlight_downloads(job_dir: Path) -> list[dict[str, Any]]:
 
 
 def list_output_languages(job_dir: Path) -> list[dict[str, Any]]:
-    """Languages the user opted in at job start (drives results UI)."""
+    """Languages for results UI: highlight langs + comprehensive summary translations."""
+    job_dir = Path(job_dir)
     data = read_highlight_status(job_dir)
-    requested = data.get("requested_languages") or []
-    if not requested:
-        requested = ["en"]
+    codes: list[str] = []
+    seen: set[str] = set()
+
+    def _add(code: str) -> None:
+        c = (code or "").strip().lower()
+        if not c or c in seen:
+            return
+        seen.add(c)
+        codes.append(c)
+
+    for code in data.get("requested_languages") or list(data.get("languages", {}).keys()):
+        _add(str(code))
+
+    try:
+        from src.summary_translate import read_summary_translations
+
+        summary_data = read_summary_translations(job_dir)
+        for code in summary_data.get("requested_languages") or []:
+            _add(str(code))
+        for code in (summary_data.get("languages") or {}).keys():
+            _add(str(code))
+    except ImportError:
+        pass
+
+    _add("en")
+
     out: list[dict[str, Any]] = []
-    for code in requested:
+    for code in codes:
         spec = LOCALES.get(code)
         if spec:
             out.append({"code": code, "name": spec.name})

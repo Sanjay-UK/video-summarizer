@@ -1,0 +1,108 @@
+{% if deploy_status and deploy_status.show_deploy_banner %}
+<section class="deploy-status-banner deploy-status-{{ deploy_status.phase }}" id="computeDeployStatus">
+  <div class="deploy-status-header">
+    <span class="deploy-status-badge">{{ deploy_status.phase_label }}</span>
+    <strong>RunPod compute</strong>
+    {% if deploy_status.hardware.name %}
+      — {{ deploy_status.hardware.name }}
+      {% if deploy_status.hardware.vram_gb %}({{ deploy_status.hardware.vram_gb }} GB){% endif %}
+    {% endif %}
+  </div>
+  <ul class="deploy-status-details">
+    {% if deploy_status.pod_id %}
+    <li><span class="deploy-status-k">Pod ID</span> <code>{{ deploy_status.pod_id }}</code></li>
+    {% endif %}
+    {% if deploy_status.runpod_live_status %}
+    <li><span class="deploy-status-k">RunPod status</span> {{ deploy_status.runpod_live_status }}</li>
+    {% endif %}
+    {% if deploy_status.cost_per_hour is not none %}
+    <li><span class="deploy-status-k">Cost</span> ${{ "%.2f"|format(deploy_status.cost_per_hour) }}/hr</li>
+    {% elif deploy_status.hardware.price_per_hour %}
+    <li><span class="deploy-status-k">Est. cost</span> ${{ "%.2f"|format(deploy_status.hardware.price_per_hour) }}/hr</li>
+    {% endif %}
+    {% if deploy_status.data_center_id %}
+    <li><span class="deploy-status-k">Data center</span> {{ deploy_status.data_center_id }}</li>
+    {% endif %}
+    {% if deploy_status.deploy_message %}
+    <li><span class="deploy-status-k">Last deploy</span> {{ deploy_status.deploy_message }}</li>
+    {% endif %}
+    {% if deploy_status.runpod_error %}
+    <li class="deploy-status-warn">{{ deploy_status.runpod_error }}</li>
+    {% endif %}
+  </ul>
+  <div class="deploy-status-links">
+    {% if deploy_status.console_url %}
+    <a href="{{ deploy_status.console_url }}" target="_blank" rel="noopener">Open in RunPod console</a>
+    {% endif %}
+    {% if deploy_status.ssh_command %}
+    <span class="deploy-status-k">SSH</span>
+    <code class="deploy-ssh-cmd">{{ deploy_status.ssh_command }}</code>
+    {% endif %}
+    <button type="button" class="deploy-refresh-btn" id="refreshDeployStatusBtn">Refresh status</button>
+    {% if deploy_status.can_stop %}
+    <button type="button" class="deploy-stop-btn" id="stopDeployPodBtn">Stop pod</button>
+    {% endif %}
+  </div>
+
+  {% if deploy_status.model_status and deploy_status.model_status.models %}
+  <div class="deploy-models-section">
+    <h4 class="deploy-models-title">Pipeline models</h4>
+    <p class="deploy-status-meta">{{ deploy_status.model_status.note }}</p>
+    <table class="deploy-models-table">
+      <thead>
+        <tr><th>Role</th><th>Engine</th><th>Model</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        {% for m in deploy_status.model_status.models %}
+        <tr>
+          <td>{{ m.role }}</td>
+          <td>{{ m.engine }}</td>
+          <td><code>{{ m.model }}</code>{% if m.detail %}<div class="deploy-status-meta">{{ m.detail }}</div>{% endif %}</td>
+          <td>{{ m.status }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <p class="deploy-status-meta">Checked {{ deploy_status.checked_at }}</p>
+</section>
+<script>
+(function () {
+  var refreshBtn = document.getElementById("refreshDeployStatusBtn");
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", function () {
+      refreshBtn.disabled = true;
+      refreshBtn.textContent = "Refreshing…";
+      if (window.DeployStatusUI && window.DeployStatusUI.fetchDeployStatusOnce) {
+        window.DeployStatusUI.fetchDeployStatusOnce().finally(function () {
+          refreshBtn.disabled = false;
+          refreshBtn.textContent = "Refresh status";
+        });
+      } else {
+        window.location.reload();
+      }
+    });
+  }
+  var stopBtn = document.getElementById("stopDeployPodBtn");
+  if (stopBtn) {
+    stopBtn.addEventListener("click", function () {
+      if (!window.confirm("Stop and terminate this RunPod pod? Billing stops after termination.")) return;
+      stopBtn.disabled = true;
+      stopBtn.textContent = "Stopping…";
+      fetch("/api/compute-deploy-stop", { method: "POST" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data.ok) alert(data.error || "Stop failed");
+          window.location.reload();
+        })
+        .catch(function (e) {
+          alert(String(e));
+          window.location.reload();
+        });
+    });
+  }
+})();
+</script>
+{% endif %}

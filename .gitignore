@@ -2,6 +2,10 @@
 output/
 downloads/
 
+# Secrets
+.env
+data/compute_selection.json
+
 # Python
 __pycache__/
 *.pyc

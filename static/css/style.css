@@ -31,6 +31,10 @@ body {
     max-width: 1000px;
     margin: 0 auto;
     padding: 0 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
 }
 
 .navbar-brand h2 {
@@ -44,6 +48,279 @@ body {
     opacity: 0.9;
     margin-top: 5px;
     display: block;
+}
+
+.navbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-shrink: 0;
+}
+
+.navbar-runtime-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+    margin: 0;
+}
+
+.navbar-runtime-label {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.navbar-runtime-checkbox {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.navbar-toggle-track {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.navbar-toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+    transition: transform 0.2s ease;
+}
+
+.navbar-runtime-toggle:has(.navbar-runtime-checkbox:checked) .navbar-toggle-track {
+    background: rgba(255, 255, 255, 0.95);
+    border-color: #ffffff;
+}
+
+.navbar-runtime-toggle:has(.navbar-runtime-checkbox:checked) .navbar-toggle-thumb {
+    transform: translateX(20px);
+    background: #5b67d8;
+}
+
+.navbar-runtime-checkbox:focus-visible + .navbar-toggle-track {
+    outline: 2px solid #ffffff;
+    outline-offset: 2px;
+}
+
+.navbar-gpu-link {
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-decoration: underline;
+    text-underline-offset: 4px;
+    text-decoration-color: rgba(255, 255, 255, 0.85);
+    white-space: nowrap;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    background: rgba(255, 255, 255, 0.15);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.navbar-gpu-link:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.28);
+    border-color: rgba(255, 255, 255, 0.9);
+    text-decoration-color: #ffffff;
+}
+
+.navbar-gpu-link:focus-visible {
+    outline: 2px solid #ffffff;
+    outline-offset: 2px;
+}
+
+/* RunPod deploy status banner */
+.deploy-status-banner {
+    max-width: 1000px;
+    margin: 0 auto 20px;
+    padding: 16px 20px;
+    border-radius: 12px;
+    border: 1px solid #cbd5e1;
+    background: #ffffff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.deploy-status-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-size: 15px;
+}
+
+.deploy-status-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.deploy-status-running .deploy-status-badge {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.deploy-status-deploying .deploy-status-badge {
+    background: #fef9c3;
+    color: #854d0e;
+}
+
+.deploy-status-failed .deploy-status-badge,
+.deploy-status-stopped .deploy-status-badge {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.deploy-status-manual .deploy-status-badge,
+.deploy-status-unknown .deploy-status-badge {
+    background: #e2e8f0;
+    color: #334155;
+}
+
+.deploy-status-details {
+    list-style: none;
+    margin: 0 0 12px;
+    padding: 0;
+    font-size: 14px;
+}
+
+.deploy-status-details li {
+    margin: 4px 0;
+}
+
+.deploy-status-k {
+    color: #64748b;
+    font-weight: 600;
+    margin-right: 6px;
+}
+
+.deploy-status-warn {
+    color: #b91c1c;
+}
+
+.deploy-status-links {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+}
+
+.deploy-status-links a {
+    color: #2563eb;
+    font-weight: 600;
+}
+
+.deploy-ssh-cmd {
+    font-size: 12px;
+    word-break: break-all;
+}
+
+.deploy-refresh-btn {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.deploy-stop-btn {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #fca5a5;
+    background: #fef2f2;
+    color: #b91c1c;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.deploy-stop-btn:hover {
+    background: #fee2e2;
+}
+
+.deploy-models-section {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.deploy-models-title {
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #334155;
+}
+
+.deploy-models-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-top: 8px;
+}
+
+.deploy-models-table th,
+.deploy-models-table td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: top;
+}
+
+.deploy-models-table th {
+    color: #64748b;
+    font-weight: 600;
+}
+
+.runtime-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.runtime-hint {
+    font-size: 13px;
+    color: #64748b;
+    margin: 0 0 4px;
+    line-height: 1.45;
+}
+
+.runtime-hint a {
+    color: #2563eb;
+}
+
+.deploy-status-meta {
+    margin: 10px 0 0;
+    font-size: 12px;
+    color: #94a3b8;
 }
 
 /* Container */

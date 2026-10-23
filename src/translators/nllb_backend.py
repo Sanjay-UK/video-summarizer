@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Optional
 
@@ -53,6 +54,11 @@ class NllbSceneTranslator:
         _ = scene_index
         if locale.code == "en":
             return english_text.strip()
+
+        if os.environ.get("NLLB_VIA_RUNPOD", "").strip() == "1":
+            from src.runpod_nllb_proxy import translate_scene_via_runpod
+
+            return translate_scene_via_runpod(english_text, locale, scene_index=scene_index)
 
         engine = _NllbEngine.get()
         import torch

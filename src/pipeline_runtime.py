@@ -1,0 +1,106 @@
+"""Where summarization runs: local Flask host vs hybrid RunPod GPU pod."""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from src.compute_deploy import load_saved_selection, _write_selection
+from src.compute_status import get_compute_deploy_status
+from src.gpu_selection import load_env_file
+
+RUNTIME_LOCAL = "local"
+RUNTIME_RUNPOD = "runpod"
+VALID_RUNTIMES = frozenset({RUNTIME_LOCAL, RUNTIME_RUNPOD})
+
+
+def load_pipeline_runtime() -> str:
+    saved = load_saved_selection()
+    if not saved:
+        return RUNTIME_LOCAL
+    value = (saved.get("pipeline_runtime") or RUNTIME_LOCAL).strip().lower()
+    return value if value in VALID_RUNTIMES else RUNTIME_LOCAL
+
+
+def save_pipeline_runtime(runtime: str) -> dict[str, Any]:
+    runtime = (runtime or "").strip().lower()
+    if runtime not in VALID_RUNTIMES:
+        return {"ok": False, "error": f"runtime must be one of: {', '.join(sorted(VALID_RUNTIMES))}"}
+
+    saved = load_saved_selection() or {}
+    saved["pipeline_runtime"] = runtime
+    _write_selection(saved)
+    return {"ok": True, "pipeline_runtime": runtime}
+
+
+def get_pipeline_runtime_status() -> dict[str, Any]:
+    runtime = load_pipeline_runtime()
+    deploy = get_compute_deploy_status(refresh_live=True)
+    phase = deploy.get("phase")
+    pod_running = phase == "running"
+    return {
+        "pipeline_runtime": runtime,
+        "execution_mode": "hybrid_runpod" if runtime == RUNTIME_RUNPOD else "local",
+        "runpod_pod_running": pod_running,
+        "runpod_phase": phase,
+        "runpod_pod_id": deploy.get("pod_id"),
+        "runpod_hardware": deploy.get("hardware"),
+        "runpod_ssh_command": deploy.get("ssh_command"),
+        "heavy_steps_remote": runtime == RUNTIME_RUNPOD and pod_running,
+        "light_steps_local": True,
+    }
+
+
+def resolve_runtime_for_job(requested: str | None = None) -> dict[str, Any]:
+    """
+    local — all steps on this machine.
+
+    hybrid_runpod (GPU toggle) — heavy inference on pod via SSH:
+      Whisper (CUDA), Ollama summarization, Google+NLLB summary translation;
+      highlight NLLB fallbacks also route to pod when chain uses NLLB.
+    Light steps always local: download, audio extract, Edge TTS, highlight
+    visuals/assembly, FFmpeg, orchestration.
+    """
+    load_env_file()
+    runtime = (requested or load_pipeline_runtime()).strip().lower()
+    if runtime not in VALID_RUNTIMES:
+        runtime = RUNTIME_LOCAL
+
+    local_ollama = os.environ.get("OLLAMA_HOST", "")
+
+    if runtime == RUNTIME_LOCAL:
+        return {
+            "runtime": RUNTIME_LOCAL,
+            "mode": "local",
+            "whisper_device": "cpu",
+            "ollama_host": local_ollama,
+            "location_label": "this machine (full pipeline local)",
+            "heavy_location": "local",
+            "light_location": "local",
+            "error": None,
+        }
+
+    deploy = get_compute_deploy_status(refresh_live=True)
+    if deploy.get("phase") != "running":
+        msg = (
+            "RunPod GPU mode requires a running pod. "
+            "Deploy from GPU selection or choose This machine."
+        )
+        return {"runtime": RUNTIME_RUNPOD, "mode": "hybrid_runpod", "error": msg}
+
+    pod_id = deploy.get("pod_id") or "unknown"
+    # On-pod Ollama for remote summarize step (worker sets default 127.0.0.1:11434).
+    runpod_ollama = os.environ.get("RUNPOD_OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434"
+
+    return {
+        "runtime": RUNTIME_RUNPOD,
+        "mode": "hybrid_runpod",
+        "whisper_device": "cuda",
+        "ollama_host": runpod_ollama,
+        "location_label": f"hybrid — heavy on RunPod pod {pod_id}, light steps local",
+        "heavy_location": "runpod",
+        "light_location": "local",
+        "runpod_pod_id": pod_id,
+        "runpod_ssh_command": deploy.get("ssh_command"),
+        "error": None,
+    }

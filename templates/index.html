@@ -16,6 +16,27 @@
  <h2>VideoSummarize</h2>
  <span class="tagline">Transform videos into summaries</span>
  </div>
+ <div class="navbar-actions">
+ <label class="navbar-runtime-toggle">
+ <span class="navbar-runtime-label">RunPod GPU</span>
+ <input
+ type="checkbox"
+ id="pipelineRuntimeToggle"
+ class="navbar-runtime-checkbox"
+ {% if pipeline_runtime == 'runpod' %}checked{% endif %}
+ aria-label="Use RunPod GPU for heavy pipeline steps"
+ >
+ <span class="navbar-toggle-track" aria-hidden="true">
+ <span class="navbar-toggle-thumb"></span>
+ </span>
+ </label>
+ <a
+ href="/gpu-selection"
+ id="navbarGpuLink"
+ class="navbar-gpu-link"
+ {% if pipeline_runtime != 'runpod' %}hidden{% endif %}
+ >GPU selection</a>
+ </div>
  </div>
  </nav>
 
@@ -277,15 +298,6 @@
  <div class="summary-text markdown-body" id="summaryContentDisplay">Loading...</div>
  <button class="btn btn-secondary" onclick="downloadSummary()">
  Download Text
- </button>
- </div>
-
- <!-- Subtitles -->
- <div class="result-card">
- <h2>Video Subtitles</h2>
- <p>Import into any video editor or player</p>
- <button class="btn btn-secondary" onclick="downloadSubtitles()">
- Download SRT File
  </button>
  </div>
 

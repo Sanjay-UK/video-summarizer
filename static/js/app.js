@@ -29,6 +29,38 @@ const SUBTASK_NAMES = {
 
 let highlightRequested = false;
 
+function getPipelineRuntimeValue() {
+ const toggle = document.getElementById('pipelineRuntimeToggle');
+ return toggle && toggle.checked ? 'runpod' : 'local';
+}
+
+function syncNavbarGpuLinkVisibility() {
+ const toggle = document.getElementById('pipelineRuntimeToggle');
+ const link = document.getElementById('navbarGpuLink');
+ if (!toggle || !link) return;
+ if (toggle.checked) {
+ link.removeAttribute('hidden');
+ link.setAttribute('aria-hidden', 'false');
+ } else {
+ link.setAttribute('hidden', '');
+ link.setAttribute('aria-hidden', 'true');
+ }
+}
+
+async function savePipelineRuntimeFromToggle() {
+ const runtime = getPipelineRuntimeValue();
+ syncNavbarGpuLinkVisibility();
+ try {
+ await fetch(`${API_BASE}/pipeline-runtime`, {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({ pipeline_runtime: runtime }),
+ });
+ } catch (e) {
+ console.warn('[APP] pipeline runtime save failed', e);
+ }
+}
+
 function toggleHighlightLangPanel() {
  /* Language panel stays visible for summary + optional highlight video. */
 }
@@ -85,9 +117,34 @@ function highlightStreamUrl(jobId, langCode) {
  return `/stream/highlight/${jobId}/${langCode}`;
 }
 
+function mergedOutputLanguages(results) {
+ const byCode = new Map();
+ (results.output_languages || []).forEach((l) => {
+ if (l && l.code) {
+ byCode.set(l.code, { code: l.code, name: l.name || l.code });
+ }
+ });
+ (results.summary_translation_status || []).forEach((row) => {
+ if (row && row.code && !byCode.has(row.code)) {
+ byCode.set(row.code, { code: row.code, name: row.name || row.code });
+ }
+ });
+ const tr = results.summary_translations || {};
+ Object.keys(tr).forEach((code) => {
+ if (!byCode.has(code)) {
+ const row = (results.summary_translation_status || []).find((r) => r.code === code);
+ byCode.set(code, { code, name: row?.name || code });
+ }
+ });
+ if (!byCode.has('en')) {
+ byCode.set('en', { code: 'en', name: 'English' });
+ }
+ return Array.from(byCode.values());
+}
+
 function populateResultsLanguageSelect(results) {
  const select = document.getElementById('resultsLangSelect');
- const langs = results.output_languages || [{ code: 'en', name: 'English' }];
+ const langs = mergedOutputLanguages(results);
  if (!select) {
  return;
  }
@@ -170,10 +227,21 @@ function applyResultsLanguageView() {
 }
 
 function initResultsPage(jobId, results) {
- cachedResults = results;
+ cachedResults = {
+ ...results,
+ output_languages: mergedOutputLanguages(results),
+ };
  currentJobId = jobId;
- populateResultsLanguageSelect(results);
- renderHighlightDownloads(jobId, results);
+ populateResultsLanguageSelect(cachedResults);
+ renderHighlightDownloads(jobId, cachedResults);
+ const listenCard = document.getElementById('listenResultCard');
+ if (listenCard) {
+ const anyHighlight = (cachedResults.highlight_language_status || []).some(
+ (r) => r.status === 'success' && r.download_available
+ );
+ listenCard.style.display =
+ cachedResults.has_audio || anyHighlight ? 'block' : 'none';
+ }
  applyResultsLanguageView();
 }
 
@@ -407,6 +475,7 @@ async function startSummarization() {
  const formData = new FormData();
  formData.append('model', model);
  formData.append('compression', compression);
+ formData.append('pipeline_runtime', getPipelineRuntimeValue());
  getSelectedOutputLanguages().forEach((lang) => {
  formData.append('highlight_languages', lang);
  });
@@ -646,12 +715,6 @@ function downloadHighlightForResultsLang() {
  downloadHighlightLang(selectedResultsLang);
 }
 
-function downloadSubtitles() {
- if (currentJobId) {
- window.location.href = `/download/subtitles/${currentJobId}`;
- }
-}
-
 function downloadHighlightLang(langCode) {
  if (currentJobId && langCode) {
  window.location.href = `/download/highlight/${currentJobId}/${langCode}`;
@@ -676,19 +739,31 @@ function loadHistory() {
  return;
  }
 
- historyList.innerHTML = jobs.map((job, idx) => `
- <div class="history-item" onclick="loadJobResults('${job.job_id}')">
+ historyList.innerHTML = jobs.map((job) => {
+ const hl = (job.highlights || []).map((h) => h.code.toUpperCase()).join(', ');
+ const sumLangs = (job.summary_languages || ['en'])
+ .map((c) => String(c).toUpperCase())
+ .join(', ');
+ const extras = [
+ job.has_summary !== false ? `Summary: ${sumLangs}` : '',
+ job.has_highlight_video && hl ? `Highlights: ${hl}` : '',
+ job.has_audio ? 'Audio' : '',
+ ].filter(Boolean);
+ return `
+ <div class="history-item" onclick="loadJobResults('${escapeHtml(job.job_id)}')">
  <div class="history-item-title">
- <span>${truncate(job.source, 40)}</span>
- <span class="history-status ${job.status}">${job.status.toUpperCase()}</span>
+ <span>${escapeHtml(truncate(job.source || job.job_id, 40))}</span>
+ <span class="history-status ${escapeHtml(job.status)}">${escapeHtml(String(job.status || '').toUpperCase())}</span>
  </div>
  <div class="history-item-meta">
- <span class="history-item-id">ID: ${job.job_id}</span>
+ <span class="history-item-id">ID: ${escapeHtml(job.job_id)}</span>
  <span> ${formatDate(job.created_at)}</span>
  ${job.completed_at ? `<span> ${formatDuration(job.created_at, job.completed_at)}</span>` : ''}
  </div>
+ ${extras.length ? `<div class="history-item-meta" style="margin-top: 6px; font-size: 12px; color: #666;">${extras.map((e) => escapeHtml(e)).join(' · ')}</div>` : ''}
  </div>
- `).join('');
+ `;
+ }).join('');
  })
  .catch(e => console.error('[HISTORY ERROR]', e));
 }
@@ -793,6 +868,14 @@ window.addEventListener('load', () => {
  // Set initial button state
  validateInputs();
  toggleHighlightLangPanel();
+
+ const runtimeToggle = document.getElementById('pipelineRuntimeToggle');
+ if (runtimeToggle) {
+ syncNavbarGpuLinkVisibility();
+ runtimeToggle.addEventListener('change', () => {
+ savePipelineRuntimeFromToggle();
+ });
+ }
 
  // Refresh history every 5 seconds
  setInterval(loadHistory, 5000);
