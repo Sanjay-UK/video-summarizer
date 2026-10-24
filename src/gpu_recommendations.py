@@ -173,6 +173,114 @@ def _alternates(
     return pool[:limit]
 
 
+def _serverless_row_to_offer(row: dict[str, Any]) -> ComputeOffer:
+    return ComputeOffer(
+        kind="gpu",
+        provider="runpod",
+        cloud="runpod-serverless",
+        name=str(row.get("name") or "GPU"),
+        price_per_hour=float(row.get("price_per_hour") or 0),
+        availability=str(row.get("availability") or "Unknown"),
+        vram_gb=row.get("vram_gb"),
+        resource_id=str(row.get("resource_id") or ""),
+        notes=str(row.get("notes") or ""),
+        data_center_id=row.get("data_center_id"),
+        data_center_name=row.get("data_center_name"),
+        serverless_pool=row.get("serverless_pool"),
+        gpu_catalog_id=row.get("gpu_catalog_id"),
+    )
+
+
+def _serverless_category_definitions() -> list[RecommendationCategory]:
+    whisper = WHISPER_MODEL
+    ollama = SUMMARIZATION_MODEL
+    return [
+        RecommendationCategory(
+            id="full_pipeline",
+            title="Full video summarizer pipeline",
+            description=(
+                f"Serverless: Whisper ({whisper}) + Ollama ({ollama}) + NLLB — "
+                f"prefer ≥{_PIPELINE_VRAM_COMFORT_GB} GB VRAM in selected region; lowest serverless $/hr."
+            ),
+            kind="gpu",
+            picker=_pick_full_pipeline,
+        ),
+        RecommendationCategory(
+            id="transcribe_and_summarize",
+            title="Transcribe + summarize only",
+            description=(
+                f"Serverless GPU with ≥{_PIPELINE_VRAM_FLOOR_GB} GB VRAM; lowest serverless $/hr in region."
+            ),
+            kind="gpu",
+            picker=_pick_transcribe_summarize,
+        ),
+        RecommendationCategory(
+            id="comfort_24gb",
+            title="24 GB comfort tier",
+            description="Serverless: ≥24 GB VRAM in selected region; lowest serverless $/hr.",
+            kind="gpu",
+            picker=_pick_comfort_24gb,
+        ),
+        RecommendationCategory(
+            id="budget_gpu",
+            title="Lowest-cost serverless GPU",
+            description="Any serverless GPU in the selected region; absolute lowest $/hr.",
+            kind="gpu",
+            picker=_pick_budget_gpu,
+        ),
+    ]
+
+
+def build_serverless_category_recommendations(
+    serverless_rows: list[dict[str, Any]],
+    *,
+    data_center_id: str,
+) -> dict[str, Any]:
+    """Rule-based picks from RunPod serverless catalog (one region at a time)."""
+    dc = (data_center_id or "").strip()
+    regional = [r for r in serverless_rows if not dc or r.get("data_center_id") == dc]
+    gpu_offers = [_serverless_row_to_offer(r) for r in regional]
+    categories_out: list[dict[str, Any]] = []
+
+    for cat in _serverless_category_definitions():
+        pick = cat.picker(gpu_offers)
+        pick_dict = offer_to_dict(pick) if pick else None
+        if pick_dict:
+            pick_dict["cloud_badges"] = next(
+                (
+                    r.get("cloud_badges")
+                    for r in regional
+                    if r.get("selection_id") == pick_dict.get("selection_id")
+                ),
+                None,
+            )
+        categories_out.append(
+            {
+                "id": cat.id,
+                "title": cat.title,
+                "description": cat.description,
+                "kind": cat.kind,
+                "pick": pick_dict,
+                "alternates": [],
+            }
+        )
+
+    primary = next((c for c in categories_out if c["id"] == "full_pipeline"), None)
+    return {
+        "engine": "rule_based_serverless",
+        "region_data_center_id": dc,
+        "models": {
+            "whisper_model": WHISPER_MODEL,
+            "summarization_model": SUMMARIZATION_MODEL,
+            "vram_comfort_gb": _PIPELINE_VRAM_COMFORT_GB,
+            "vram_min_gb": _PIPELINE_VRAM_MIN_GB,
+            "vram_floor_gb": _PIPELINE_VRAM_FLOOR_GB,
+        },
+        "categories": categories_out,
+        "recommended_gpu_for_pipeline": primary.get("pick") if primary else None,
+    }
+
+
 def build_category_recommendations(
     gpu_offers: list[ComputeOffer],
     cpu_offers: list[ComputeOffer],

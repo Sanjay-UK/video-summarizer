@@ -1,5 +1,5 @@
 {% if deploy_status and deploy_status.show_deploy_banner %}
-<section class="deploy-status-banner deploy-status-{{ deploy_status.phase }}" id="computeDeployStatus">
+<section class="deploy-status-banner deploy-status-{{ deploy_status.phase }}" id="computeDeployStatus" data-compute-mode="{{ deploy_status.compute_mode or '' }}">
   <div class="deploy-status-header">
     <span class="deploy-status-badge">{{ deploy_status.phase_label }}</span>
     <strong>RunPod compute</strong>
@@ -9,6 +9,21 @@
     {% endif %}
   </div>
   <ul class="deploy-status-details">
+    {% if deploy_status.compute_mode == 'serverless' %}
+    <li><span class="deploy-status-k">Mode</span> RunPod Serverless (scale to zero)</li>
+    {% endif %}
+    {% if deploy_status.endpoint_id %}
+    <li><span class="deploy-status-k">Endpoint ID</span> <code>{{ deploy_status.endpoint_id }}</code></li>
+    {% endif %}
+    {% if deploy_status.network_volume_id %}
+    <li><span class="deploy-status-k">Network volume</span> <code>{{ deploy_status.network_volume_id }}</code></li>
+    {% endif %}
+    {% if deploy_status.last_delay_time_ms is not none %}
+    <li><span class="deploy-status-k">Last delayTime</span> {{ deploy_status.last_delay_time_ms }} ms</li>
+    {% endif %}
+    {% if deploy_status.last_execution_time_ms is not none %}
+    <li><span class="deploy-status-k">Last executionTime</span> {{ deploy_status.last_execution_time_ms }} ms</li>
+    {% endif %}
     {% if deploy_status.pod_id %}
     <li><span class="deploy-status-k">Pod ID</span> <code>{{ deploy_status.pod_id }}</code></li>
     {% endif %}
@@ -22,6 +37,22 @@
     {% endif %}
     {% if deploy_status.data_center_id %}
     <li><span class="deploy-status-k">Data center</span> {{ deploy_status.data_center_id }}</li>
+    {% endif %}
+    {% if deploy_status.idle_auto_stop_note %}
+    <li class="deploy-status-warn">
+      <span class="deploy-status-k">Idle stop</span> {{ deploy_status.idle_auto_stop_note }}
+      {% if deploy_status.idle_monitor_url %}
+      <a href="{{ deploy_status.idle_monitor_url }}" target="_blank" rel="noopener">Idle monitor</a>
+      {% endif %}
+    </li>
+    {% endif %}
+    {% if deploy_status.spend_cap_note %}
+    <li class="deploy-status-warn">
+      <span class="deploy-status-k">Spend cap</span> {{ deploy_status.spend_cap_note }}
+      {% if deploy_status.billing_docs_url %}
+      <a href="{{ deploy_status.billing_docs_url }}" target="_blank" rel="noopener">Billing</a>
+      {% endif %}
+    </li>
     {% endif %}
     {% if deploy_status.deploy_message %}
     <li><span class="deploy-status-k">Last deploy</span> {{ deploy_status.deploy_message }}</li>
@@ -40,7 +71,25 @@
     {% endif %}
     <button type="button" class="deploy-refresh-btn" id="refreshDeployStatusBtn">Refresh status</button>
     {% if deploy_status.can_stop %}
-    <button type="button" class="deploy-stop-btn" id="stopDeployPodBtn">Stop pod</button>
+    <div class="deploy-stop-row">
+      <button type="button" class="deploy-stop-btn" id="stopDeployPodBtn">
+        {% if deploy_status.compute_mode == 'serverless' %}Stop serverless{% else %}{{ deploy_status.stop_action_label or 'Stop pod' }}{% endif %}
+      </button>
+      {% if deploy_status.compute_mode == 'serverless' %}
+      <span class="deploy-stop-metrics">
+        {% if deploy_status.serverless_idle_timeout_sec is not none %}
+        Idle timeout: {{ deploy_status.serverless_idle_timeout_sec }}s
+        {% endif %}
+        {% if deploy_status.serverless_max_cost_per_hour_usd is not none %}
+        {% if deploy_status.serverless_idle_timeout_sec is not none %} · {% endif %}
+        Max ~${{ "%.2f"|format(deploy_status.serverless_max_cost_per_hour_usd) }}/hr at full scale
+        {% endif %}
+      </span>
+      {% endif %}
+    </div>
+    {% endif %}
+    {% if deploy_status.can_delete_volume %}
+    <button type="button" class="deploy-delete-volume-btn" id="deleteNetworkVolumeBtn">Delete network volume</button>
     {% endif %}
   </div>
 
@@ -88,13 +137,51 @@
   var stopBtn = document.getElementById("stopDeployPodBtn");
   if (stopBtn) {
     stopBtn.addEventListener("click", function () {
-      if (!window.confirm("Stop and terminate this RunPod pod? Billing stops after termination.")) return;
+      var banner = document.getElementById("computeDeployStatus");
+      var isServerless = banner && banner.getAttribute("data-compute-mode") === "serverless";
+      var msg = isServerless
+        ? "Scale serverless workers to zero? Running GPU workers stop billing; the endpoint remains."
+        : "Stop and terminate this RunPod pod? Billing stops after termination.";
+      if (!window.confirm(msg)) return;
       stopBtn.disabled = true;
       stopBtn.textContent = "Stopping…";
       fetch("/api/compute-deploy-stop", { method: "POST" })
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (!data.ok) alert(data.error || "Stop failed");
+          window.location.reload();
+        })
+        .catch(function (e) {
+          alert(String(e));
+          window.location.reload();
+        });
+    });
+  }
+  var deleteBtn = document.getElementById("deleteNetworkVolumeBtn");
+  if (deleteBtn) {
+    deleteBtn.addEventListener("click", function () {
+      if (
+        !window.confirm(
+          "Delete the RunPod network volume? All cached model weights on this volume are permanently lost."
+        )
+      ) {
+        return;
+      }
+      var typed = window.prompt('Type DELETE to confirm volume deletion:', "");
+      if (typed !== "DELETE") {
+        alert("Volume deletion cancelled.");
+        return;
+      }
+      deleteBtn.disabled = true;
+      deleteBtn.textContent = "Deleting…";
+      fetch("/api/compute-network-volume-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "DELETE" }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data.ok) alert(data.error || "Delete failed");
           window.location.reload();
         })
         .catch(function (e) {

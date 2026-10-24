@@ -1,0 +1,37 @@
+{% for section in serverless_sections %}
+<section class="gpu-card" data-serverless-section="{{ section.key }}">
+  <h3>{{ section.title }}</h3>
+  <table class="gpu-table">
+    <thead>
+      <tr>
+        <th></th><th>Name</th><th>Pool</th><th>VRAM</th><th>Serverless $/hr</th>
+        <th>Availability</th><th>Cloud</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for g in section.rows %}
+      {% set checked = (default_selection_id == g.selection_id) %}
+      <tr class="selectable-row serverless-gpu-row{% if checked %} is-saved{% endif %}"
+          data-serverless-dc="{{ g.data_center_id }}"
+          data-selection-id="{{ g.selection_id }}"
+          data-offer="{{ g | tojson | forceescape }}">
+        <td>
+          <input type="radio" name="selection_id" value="{{ g.selection_id }}"
+            {% if checked %}checked{% endif %}
+            aria-label="Select {{ g.name }} in {{ g.data_center_name }}">
+        </td>
+        <td>{{ g.name }}</td>
+        <td class="gpu-meta">{{ g.serverless_pool or '—' }}</td>
+        <td>{% if g.vram_gb %}{{ g.vram_gb }} GB{% else %}—{% endif %}</td>
+        <td>${{ "%.3f"|format(g.price_per_hour) }}</td>
+        <td>{{ g.availability }}</td>
+        <td class="gpu-meta">{{ g.cloud_badges or g.notes }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endfor %}
+{% if not serverless_sections %}
+<p class="gpu-meta">No serverless GPUs in this region right now. Try another data center or refresh.</p>
+{% endif %}

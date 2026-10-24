@@ -29,6 +29,17 @@ def nllb_via_runpod_enabled() -> bool:
 def translate_texts_via_runpod(language_code: str, english_texts: list[str]) -> list[str]:
     if not english_texts:
         return []
+    from src.compute_deploy import COMPUTE_MODE_SERVERLESS, load_compute_mode
+
+    if load_compute_mode() == COMPUTE_MODE_SERVERLESS:
+        from src.runpod_serverless import load_endpoint_id_from_selection, run_nllb_batch_via_serverless
+
+        return run_nllb_batch_via_serverless(
+            load_endpoint_id_from_selection(),
+            language_code,
+            english_texts,
+        )
+
     target = get_runpod_ssh_target()
     sync_project_bundle(target, _PROJECT_DIR)
     batch_id = uuid.uuid4().hex[:12]

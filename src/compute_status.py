@@ -10,12 +10,21 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
-from src.compute_deploy import SELECTION_PATH, mark_saved_deploy_stopped
+from src.compute_deploy import (
+    COMPUTE_MODE_SERVERLESS,
+    SELECTION_PATH,
+    load_compute_mode,
+    load_saved_selection,
+    mark_saved_deploy_stopped,
+)
 from src.gpu_selection import load_env_file
 from src.pipeline_model_status import get_pipeline_model_status
+from src.runpod_platform_controls import platform_controls_status
+from src.runpod_serverless_endpoint_config import IDLE_TIMEOUT_SEC, WORKERS_MAX
 
 RUNPOD_PODS_URL = "https://api.runpod.io/v2/pods"
 RUNPOD_CONSOLE_POD_URL = "https://www.runpod.io/console/pods/{pod_id}"
+RUNPOD_CONSOLE_SERVERLESS_URL = "https://www.runpod.io/console/serverless/{endpoint_id}"
 
 
 def _utc_now() -> str:
@@ -141,10 +150,89 @@ def _finalize_deploy_status(out: dict[str, Any]) -> dict[str, Any]:
         phase = "deploying"
         out["phase"] = phase
         out["phase_label"] = _label_for_phase(phase)
+    if (
+        out.get("compute_mode") == COMPUTE_MODE_SERVERLESS
+        and out.get("deploy_record_status") == "deployed"
+        and out.get("endpoint_id")
+    ):
+        out["show_deploy_banner"] = True
+        out["has_active_pod"] = bool(out.get("workers_max", 0) and out.get("workers_max", 0) > 0)
+        return out
     active = phase in _ACTIVE_BANNER_PHASES
     out["show_deploy_banner"] = active
     out["has_active_pod"] = active
     return out
+
+
+def _apply_last_job_metrics(out: dict[str, Any], deploy: dict[str, Any]) -> None:
+    metrics = deploy.get("last_job_metrics") or {}
+    if metrics.get("delayTime") is not None:
+        out["last_delay_time_ms"] = metrics.get("delayTime")
+    if metrics.get("executionTime") is not None:
+        out["last_execution_time_ms"] = metrics.get("executionTime")
+    out["last_runpod_job_id"] = metrics.get("runpod_job_id")
+
+
+def _serverless_deploy_status(
+    out: dict[str, Any],
+    deploy: dict[str, Any],
+    saved: dict[str, Any] | None,
+    *,
+    refresh_live: bool,
+) -> dict[str, Any]:
+    endpoint_id = (deploy.get("endpoint_id") or "").strip()
+    out["endpoint_id"] = endpoint_id or None
+    out["network_volume_id"] = (deploy.get("network_volume_id") or "").strip() or None
+    out["stop_action_label"] = "Stop serverless"
+    out["can_delete_volume"] = bool(out.get("network_volume_id"))
+    _apply_last_job_metrics(out, deploy)
+    out["warmup_status"] = deploy.get("warmup_status")
+    out["serverless_models"] = saved.get("serverless_models") if saved else None
+
+    hw_price = float((out.get("hardware") or {}).get("price_per_hour") or 0)
+    workers_max = out.get("workers_max")
+    if workers_max is None:
+        workers_max = WORKERS_MAX
+    out["serverless_idle_timeout_sec"] = out.get("workers_idle_timeout") or IDLE_TIMEOUT_SEC
+    out["serverless_max_cost_per_hour_usd"] = round(hw_price * float(workers_max or 0), 3)
+
+    deploy_result = out.get("deploy_record_status")
+    if deploy_result in ("failed", "pending"):
+        return _finalize_deploy_status(out)
+
+    if not endpoint_id:
+        out["phase"] = "failed"
+        out["phase_label"] = "No endpoint ID"
+        return _finalize_deploy_status(out)
+
+    out["console_url"] = RUNPOD_CONSOLE_SERVERLESS_URL.format(endpoint_id=endpoint_id)
+    out["can_stop"] = deploy_result == "deployed"
+    out["phase"] = "ready"
+    out["phase_label"] = "Serverless (scale to zero)"
+    out["data_center_id"] = deploy.get("data_center_id") or out.get("data_center_id")
+
+    if not refresh_live:
+        return _finalize_deploy_status(out)
+
+    api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+    if not api_key:
+        out["runpod_error"] = "RUNPOD_API_KEY not set; showing saved serverless deploy only."
+        return _finalize_deploy_status(out)
+
+    from src.runpod_serverless import get_serverless_endpoint
+
+    live, err = get_serverless_endpoint(endpoint_id)
+    if err:
+        out["runpod_error"] = err
+        return _finalize_deploy_status(out)
+    workers = (live or {}).get("workers") or {}
+    out["workers_min"] = workers.get("min")
+    out["workers_max"] = workers.get("max")
+    out["workers_idle_timeout"] = workers.get("idleTimeout")
+    if workers.get("max") == 0:
+        out["phase"] = "stopped"
+        out["phase_label"] = "Workers scaled to 0"
+    return _finalize_deploy_status(out)
 
 
 def get_compute_deploy_status(refresh_live: bool = True) -> dict[str, Any]:
@@ -163,6 +251,7 @@ def get_compute_deploy_status(refresh_live: bool = True) -> dict[str, Any]:
             "show_deploy_banner": False,
             "checked_at": _utc_now(),
             "model_status": get_pipeline_model_status(),
+            **platform_controls_status(),
         }
 
     offer = saved.get("offer") or {}
@@ -171,10 +260,13 @@ def get_compute_deploy_status(refresh_live: bool = True) -> dict[str, Any]:
     pod_id = (deploy.get("pod_id") or "").strip()
     deploy_result = deploy.get("status", "")
 
+    compute_mode = saved.get("compute_mode") or load_compute_mode()
+
     out: dict[str, Any] = {
         "has_deploy": True,
         "show_deploy_banner": False,
         "checked_at": _utc_now(),
+        "compute_mode": compute_mode,
         "selection_id": saved.get("selection_id"),
         "saved_at": saved.get("saved_at"),
         "hardware": {
@@ -198,8 +290,32 @@ def get_compute_deploy_status(refresh_live: bool = True) -> dict[str, Any]:
         "console_url": None,
         "public_ip": None,
         "can_stop": False,
+        "can_delete_volume": False,
+        "endpoint_id": None,
+        "network_volume_id": None,
+        "stop_action_label": "Stop pod",
+        "last_delay_time_ms": None,
+        "last_execution_time_ms": None,
+        "last_runpod_job_id": None,
         "model_status": get_pipeline_model_status(),
+        **platform_controls_status(),
     }
+
+    if compute_mode == COMPUTE_MODE_SERVERLESS and provider == "runpod":
+        if deploy_result == "stopped":
+            out["phase"] = "stopped"
+            out["phase_label"] = "Stopped"
+            _apply_last_job_metrics(out, deploy)
+            return _finalize_deploy_status(out)
+        if deploy_result == "failed":
+            out["phase"] = "failed"
+            out["phase_label"] = "Deploy failed"
+            return _finalize_deploy_status(out)
+        if deploy_result == "pending":
+            out["phase"] = "deploying"
+            out["phase_label"] = "Deploying serverless"
+            return _finalize_deploy_status(out)
+        return _serverless_deploy_status(out, deploy, saved, refresh_live=refresh_live)
 
     if provider == "aws" or deploy_result == "manual":
         out["phase"] = "manual"
@@ -243,6 +359,7 @@ def get_compute_deploy_status(refresh_live: bool = True) -> dict[str, Any]:
         out["ssh_command"] = proxy.get("command")
         out["ssh_host"] = proxy.get("host")
 
+    out.update(platform_controls_status())
     if not refresh_live:
         out["phase_label"] = _label_for_phase(out["phase"])
         return _finalize_deploy_status(out)
@@ -283,4 +400,5 @@ def get_compute_deploy_status(refresh_live: bool = True) -> dict[str, Any]:
         if proxy.get("command"):
             out["ssh_command"] = proxy.get("command")
             out["ssh_host"] = proxy.get("host")
+
     return _finalize_deploy_status(out)

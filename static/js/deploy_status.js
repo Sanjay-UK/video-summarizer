@@ -56,18 +56,87 @@
         rows +
         "</tbody></table></div>";
     }
+    var stopLabel =
+      status.compute_mode === "serverless"
+        ? status.stop_action_label || "Stop serverless"
+        : status.stop_action_label || "Stop pod";
+    var stopMetrics = "";
+    if (status.compute_mode === "serverless") {
+      var idleSec = status.serverless_idle_timeout_sec;
+      var maxUsd = status.serverless_max_cost_per_hour_usd;
+      if (idleSec != null || maxUsd != null) {
+        stopMetrics =
+          '<span class="deploy-stop-metrics">' +
+          (idleSec != null ? "Idle timeout: " + esc(idleSec) + "s" : "") +
+          (idleSec != null && maxUsd != null ? " · " : "") +
+          (maxUsd != null ? "Max ~$" + esc(Number(maxUsd).toFixed(2)) + "/hr at full scale" : "") +
+          "</span>";
+      }
+    }
     var stopBtn = status.can_stop
-      ? '<button type="button" class="deploy-stop-btn" id="stopDeployPodBtn">Stop pod</button>'
+      ? '<div class="deploy-stop-row"><button type="button" class="deploy-stop-btn" id="stopDeployPodBtn">' +
+        esc(stopLabel) +
+        "</button>" +
+        stopMetrics +
+        "</div>"
       : "";
+    var deleteVolBtn =
+      status.can_delete_volume
+        ? '<button type="button" class="deploy-delete-volume-btn" id="deleteNetworkVolumeBtn">Delete network volume</button>'
+        : "";
+    var delayLine = "";
+    if (status.last_delay_time_ms != null) {
+      delayLine =
+        '<li><span class="deploy-status-k">Last delayTime</span> ' +
+        esc(String(status.last_delay_time_ms)) +
+        " ms (" +
+        (Number(status.last_delay_time_ms) / 1000).toFixed(1) +
+        "s cold start + queue)</li>";
+    }
+    if (status.last_execution_time_ms != null) {
+      delayLine +=
+        '<li><span class="deploy-status-k">Last executionTime</span> ' +
+        esc(String(status.last_execution_time_ms)) +
+        " ms</li>";
+    }
     return (
       '<section class="deploy-status-banner deploy-status-' +
       esc(status.phase || "unknown") +
-      '" id="computeDeployStatus">' +
+      '" id="computeDeployStatus" data-compute-mode="' +
+      esc(status.compute_mode || "") +
+      '">' +
       '<div class="deploy-status-header"><span class="deploy-status-badge">' +
       esc(status.phase_label || "") +
       "</span> <strong>RunPod compute</strong>" +
       (hwName ? " — " + hwName + " " + vram : "") +
       '</div><ul class="deploy-status-details">' +
+      (status.compute_mode === "serverless"
+        ? '<li><span class="deploy-status-k">Mode</span> RunPod Serverless (scale to zero)</li>'
+        : "") +
+      (status.endpoint_id
+        ? '<li><span class="deploy-status-k">Endpoint ID</span> <code>' +
+          esc(status.endpoint_id) +
+          "</code></li>"
+        : "") +
+      (status.network_volume_id
+        ? '<li><span class="deploy-status-k">Network volume</span> <code>' +
+          esc(status.network_volume_id) +
+          "</code></li>"
+        : "") +
+      (status.workers_max != null
+        ? '<li><span class="deploy-status-k">Workers max</span> ' + esc(status.workers_max) + "</li>"
+        : "") +
+      (status.serverless_models
+        ? '<li><span class="deploy-status-k">Models</span> Whisper ' +
+          esc(status.serverless_models.whisper) +
+          ", Ollama " +
+          esc(status.serverless_models.ollama) +
+          "</li>"
+        : "") +
+      (status.warmup_status
+        ? '<li><span class="deploy-status-k">Warmup</span> ' + esc(status.warmup_status) + "</li>"
+        : "") +
+      delayLine +
       (status.pod_id
         ? '<li><span class="deploy-status-k">Pod ID</span> <code>' + esc(status.pod_id) + "</code></li>"
         : "") +
@@ -77,6 +146,22 @@
       (cost ? '<li><span class="deploy-status-k">Cost</span> ' + esc(cost) + "</li>" : "") +
       (status.data_center_id
         ? '<li><span class="deploy-status-k">Data center</span> ' + esc(status.data_center_id) + "</li>"
+        : "") +
+      (status.idle_auto_stop_note
+        ? '<li class="deploy-status-warn"><span class="deploy-status-k">Idle stop</span> ' +
+          esc(status.idle_auto_stop_note) +
+          (status.idle_monitor_url
+            ? ' <a href="' + esc(status.idle_monitor_url) + '" target="_blank" rel="noopener">Idle monitor</a>'
+            : "") +
+          "</li>"
+        : "") +
+      (status.spend_cap_note
+        ? '<li class="deploy-status-warn"><span class="deploy-status-k">Spend cap</span> ' +
+          esc(status.spend_cap_note) +
+          (status.billing_docs_url
+            ? ' <a href="' + esc(status.billing_docs_url) + '" target="_blank" rel="noopener">Billing</a>'
+            : "") +
+          "</li>"
         : "") +
       (status.deploy_message
         ? '<li><span class="deploy-status-k">Last deploy</span> ' + esc(status.deploy_message) + "</li>"
@@ -97,6 +182,8 @@
         : "") +
       '<button type="button" class="deploy-refresh-btn" id="refreshDeployStatusBtn">Refresh status</button> ' +
       stopBtn +
+      " " +
+      deleteVolBtn +
       "</div>" +
       modelsHtml +
       '<p class="deploy-status-meta">Checked ' +
@@ -129,7 +216,13 @@
     if (stopBtn && !stopBtn.dataset.wired) {
       stopBtn.dataset.wired = "1";
       stopBtn.addEventListener("click", function () {
-        if (!window.confirm("Stop and terminate this RunPod pod? Billing stops after termination.")) return;
+        var banner = document.getElementById("computeDeployStatus");
+        var isServerless =
+          banner && banner.getAttribute("data-compute-mode") === "serverless";
+        var msg = isServerless
+          ? "Scale serverless workers to zero? Running GPU workers stop billing; the endpoint remains."
+          : "Stop and terminate this RunPod pod? Billing stops after termination.";
+        if (!window.confirm(msg)) return;
         stopBtn.disabled = true;
         stopBtn.textContent = "Stopping…";
         fetch("/api/compute-deploy-stop", { method: "POST" })
@@ -138,6 +231,42 @@
           })
           .then(function (data) {
             if (!data.ok) alert(data.error || "Stop failed");
+            if (data.deploy_status) mountDeployStatus(data.deploy_status);
+            else fetchDeployStatusOnce();
+          })
+          .catch(function (e) {
+            alert(String(e));
+          });
+      });
+    }
+    var deleteBtn = document.getElementById("deleteNetworkVolumeBtn");
+    if (deleteBtn && !deleteBtn.dataset.wired) {
+      deleteBtn.dataset.wired = "1";
+      deleteBtn.addEventListener("click", function () {
+        if (
+          !window.confirm(
+            "Delete the RunPod network volume? All cached model weights on this volume are permanently lost. Next cold starts re-download NLLB/Ollama/Whisper caches."
+          )
+        ) {
+          return;
+        }
+        var typed = window.prompt('Type DELETE to confirm volume deletion:', "");
+        if (typed !== "DELETE") {
+          alert("Volume deletion cancelled.");
+          return;
+        }
+        deleteBtn.disabled = true;
+        deleteBtn.textContent = "Deleting…";
+        fetch("/api/compute-network-volume-delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ confirm: "DELETE" }),
+        })
+          .then(function (r) {
+            return r.json();
+          })
+          .then(function (data) {
+            if (!data.ok) alert(data.error || "Delete failed");
             if (data.deploy_status) mountDeployStatus(data.deploy_status);
             else fetchDeployStatusOnce();
           })
@@ -179,7 +308,11 @@
     pollTimer = setInterval(function () {
       pollCount += 1;
       fetchDeployStatusOnce().then(function (status) {
-        if (status && status.show_deploy_banner && status.phase === "running") {
+        if (
+          status &&
+          status.show_deploy_banner &&
+          (status.phase === "running" || status.phase === "ready")
+        ) {
           stopDeployStatusPolling();
         } else if (pollCount >= POLL_MAX) {
           stopDeployStatusPolling();

@@ -435,8 +435,11 @@ function initializeDragDrop() {
  });
 }
 
+/** Fixed summarizer model (Ollama on RunPod/local). Change via GPU page serverless settings, not homepage. */
+const SUMMARIZATION_MODEL = 'llama3.2:3b';
+
 async function startSummarization() {
- const model = document.querySelector('input[name="model"]:checked').value;
+ const model = SUMMARIZATION_MODEL;
  const compression = document.querySelector('input[name="compression"]:checked').value;
  highlightRequested = shouldGenerateHighlightVideo();
  let source = null;

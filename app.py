@@ -18,7 +18,7 @@ from src.downloader import handle_video_source, download_youtube_video, get_loca
 from src.audio_extractor import extract_audio
 from src.subtitle_generator import generate_subtitles
 from src.tts_generator import generate_audio_explanation
-from config import OUTPUT_DIR, DOWNLOADS_DIR, choose_whisper_model
+from config import OUTPUT_DIR, DOWNLOADS_DIR, SUMMARIZATION_MODEL, choose_whisper_model
 from src.job_video import copy_source_video_to_job
 from src.highlight_ffmpeg import log_ffmpeg_subtitles_status_on_startup
 from src.highlight_jobs import (
@@ -34,7 +34,11 @@ from src.locales import LOCALES, parse_language_list
 from src.summary_jobs import clean_summary_text_for_display, summary_translations_for_api
 from src.summary_translate import summary_text_for_language, translate_summary_for_languages
 from src.gpu_selection import build_gpu_selection_report
-from src.compute_deploy import save_selection_and_deploy, stop_saved_runpod_pod
+from src.compute_deploy import (
+    delete_saved_network_volume,
+    save_selection_and_deploy,
+    stop_saved_runpod_pod,
+)
 from src.compute_status import get_compute_deploy_status
 from src.pipeline_executor import (
     apply_runtime_side_effects,
@@ -251,31 +255,49 @@ def process_video(
 
         audio_duration = probe_duration_seconds(audio_path)
         whisper_model = choose_whisper_model(audio_duration)
+        from src.compute_deploy import COMPUTE_MODE_SERVERLESS, load_compute_mode
+
+        if (
+            runtime_ctx.get("mode") == "hybrid_runpod"
+            and load_compute_mode() == COMPUTE_MODE_SERVERLESS
+        ):
+            from src.serverless_model_catalog import load_saved_serverless_models
+
+            sm = load_saved_serverless_models()
+            whisper_model = sm.get("whisper") or whisper_model
+            model = sm.get("ollama") or model
         job.add_log(
             f"Heavy phase (~{audio_duration:.0f}s audio, Whisper {whisper_model}, "
             f"summarize {model})..."
         )
         if runtime_ctx.get("mode") == "hybrid_runpod":
-            import os
+            if load_compute_mode() != COMPUTE_MODE_SERVERLESS:
+                import os
 
-            from src.runpod_ssh import probe_runpod_ssh_reachable
+                from src.runpod_ssh import probe_runpod_ssh_reachable
 
-            transport = os.environ.get("RUNPOD_REMOTE_TRANSPORT", "auto").strip().lower()
-            job.add_log("Checking RunPod connectivity before GPU work...")
-            if transport in ("http", "jupyter"):
-                from src.runpod_jupyter import probe_jupyter_reachable
-
-                probe_jupyter_reachable()
-            elif transport == "ssh":
-                probe_runpod_ssh_reachable()
-            else:
-                try:
-                    probe_runpod_ssh_reachable()
-                except RuntimeError:
+                transport = os.environ.get("RUNPOD_REMOTE_TRANSPORT", "auto").strip().lower()
+                job.add_log("Checking RunPod connectivity before GPU work...")
+                if transport in ("http", "jupyter"):
                     from src.runpod_jupyter import probe_jupyter_reachable
 
-                    job.add_log("SSH unreachable; using RunPod Jupyter HTTP proxy (port 8888).")
                     probe_jupyter_reachable()
+                elif transport == "ssh":
+                    probe_runpod_ssh_reachable()
+                else:
+                    try:
+                        probe_runpod_ssh_reachable()
+                    except RuntimeError:
+                        from src.runpod_jupyter import probe_jupyter_reachable
+
+                        job.add_log(
+                            "SSH unreachable; using RunPod Jupyter HTTP proxy (port 8888)."
+                        )
+                        probe_jupyter_reachable()
+            else:
+                job.add_log(
+                    "RunPod serverless: submitting GPU job (workers scale from zero on RunPod)."
+                )
         job.set_step("transcribing", 0.35)
         executor.run_heavy_phase(
             job_id=job_id,
@@ -510,12 +532,68 @@ def pipeline_runtime_api():
 
 @app.route("/api/compute-deploy-stop", methods=["POST"])
 def compute_deploy_stop_api():
-    """Terminate the RunPod pod from data/compute_selection.json."""
+    """Stop RunPod compute: scale serverless workers to 0 or terminate legacy pod."""
     result = stop_saved_runpod_pod()
     status = 200 if result.get("ok") else 400
     if result.get("ok"):
         result["deploy_status"] = get_compute_deploy_status(refresh_live=False)
     return jsonify(result), status
+
+
+@app.route("/api/compute-network-volume-delete", methods=["POST"])
+def compute_network_volume_delete_api():
+    """Detach and delete the RunPod network volume (destroys cached model weights)."""
+    data = request.get_json(silent=True) or {}
+    confirm = (data.get("confirm") or request.form.get("confirm") or "").strip()
+    result = delete_saved_network_volume(confirm=confirm)
+    status = 200 if result.get("ok") else 400
+    if result.get("ok"):
+        result["deploy_status"] = get_compute_deploy_status(refresh_live=False)
+    return jsonify(result), status
+
+
+@app.route("/api/gpu-selection/serverless-region", methods=["GET"])
+def gpu_selection_serverless_region_api():
+    """Live RunPod serverless catalog for one data center (refreshed on every request)."""
+    from src.compute_deploy import load_saved_selection
+    from src.gpu_selection import load_env_file
+    from src.serverless_gpu_region import EMPTY_SERVERLESS_RECOMMENDATIONS, fetch_live_serverless_region
+
+    load_env_file()
+    dc = (request.args.get("data_center_id") or "").strip()
+    if not dc:
+        return jsonify({"ok": False, "error": "data_center_id query parameter is required"}), 400
+    api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+    if not api_key:
+        return jsonify({"ok": False, "error": "RUNPOD_API_KEY missing in .env"}), 400
+
+    saved = load_saved_selection()
+    deploy_status = (saved or {}).get("deploy")
+    env_pools = os.environ.get("RUNPOD_SERVERLESS_GPU_POOLS", "ADA_24,AMPERE_16").strip()
+    payload = fetch_live_serverless_region(
+        api_key,
+        dc,
+        saved=saved,
+        deploy_status=deploy_status if isinstance(deploy_status, dict) else None,
+        env_gpu_pools=env_pools,
+    )
+    payload["html"] = {
+        "gpu_catalog": render_template(
+            "partials/serverless_gpu_catalog.html",
+            serverless_sections=payload.get("serverless_sections") or [],
+            default_selection_id=payload.get("default_selection_id"),
+        ),
+        "recommendations": render_template(
+            "partials/serverless_recommendations.html",
+            recommendations=payload.get("recommendations") or EMPTY_SERVERLESS_RECOMMENDATIONS,
+        ),
+        "saved_display": render_template(
+            "partials/serverless_saved_display.html",
+            saved_display=payload.get("saved_display") or {"kind": "none"},
+        ),
+    }
+    status = 200 if payload.get("ok") else 502
+    return jsonify(payload), status
 
 
 @app.route("/api/gpu-selection", methods=["GET", "POST"])
@@ -526,7 +604,28 @@ def gpu_selection_api():
     body = request.get_json(silent=True) or {}
     selection_id = body.get("selection_id") or request.form.get("selection_id", "")
     client_offer = body.get("offer") if isinstance(body.get("offer"), dict) else None
-    result = save_selection_and_deploy(selection_id, client_offer=client_offer)
+    serverless_models = body.get("serverless_models")
+    if not isinstance(serverless_models, dict):
+        serverless_models = None
+    serverless_dc = body.get("serverless_data_center_id")
+    if not isinstance(serverless_dc, str):
+        serverless_dc = None
+    docker_hub_user = body.get("docker_hub_user")
+    if docker_hub_user is not None and not isinstance(docker_hub_user, str):
+        docker_hub_user = None
+    result = save_selection_and_deploy(
+        selection_id,
+        client_offer=client_offer,
+        serverless_models=serverless_models,
+        serverless_data_center_id=serverless_dc,
+        docker_hub_user=docker_hub_user,
+    )
+    if result.get("ok"):
+        from src.compute_deploy import COMPUTE_MODE_SERVERLESS, load_compute_mode
+        from src.pipeline_runtime import RUNTIME_RUNPOD, save_pipeline_runtime
+
+        if load_compute_mode() == COMPUTE_MODE_SERVERLESS:
+            save_pipeline_runtime(RUNTIME_RUNPOD)
     if result.get("ok"):
         result["deploy_status"] = get_compute_deploy_status(refresh_live=True)
     status = 200 if result.get("ok") else 400
@@ -545,7 +644,8 @@ def summarize():
     """Start summarization process from URL or uploaded file."""
     try:
         url = request.form.get("url", "").strip()
-        model = request.form.get("model", "llama3.2:3b")
+        # Homepage no longer exposes model picker; serverless GPU page saves worker models separately.
+        model = SUMMARIZATION_MODEL
         compression = request.form.get("compression", "medium")
         highlight_video = request.form.get("highlight_video", "").lower() in ("1", "true", "on", "yes")
         lang_parts = request.form.getlist("highlight_languages")
@@ -854,6 +954,10 @@ def log_runpod_ssh_health_on_startup() -> None:
 
         if load_pipeline_runtime() != RUNTIME_RUNPOD:
             return
+        from src.compute_deploy import COMPUTE_MODE_SERVERLESS, load_compute_mode
+
+        if load_compute_mode() == COMPUTE_MODE_SERVERLESS:
+            return
         prior_probe = os.environ.get("RUNPOD_SSH_PROBE_TIMEOUT")
         os.environ["RUNPOD_SSH_PROBE_TIMEOUT"] = "12"
         try:
@@ -881,5 +985,6 @@ if __name__ == "__main__":
     print("Starting Video Summarization Web App...")
     log_ffmpeg_subtitles_status_on_startup()
     log_runpod_ssh_health_on_startup()
+    _flask_debug = True
     print("Open: http://localhost:5000")
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=_flask_debug, host="0.0.0.0", port=5000)

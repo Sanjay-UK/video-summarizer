@@ -36,6 +36,38 @@
     }
     .pick-rec-btn:hover { background: #eff6ff; }
     .rec-top { font-size: 1.05rem; margin: 0 0 8px; }
+    .idle-stop-field {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+      margin: 0 0 20px; padding: 14px 16px; background: #f8fafc;
+      border: 1px solid #e2e8f0; border-radius: 10px;
+    }
+    .idle-stop-field label { font-weight: 600; color: #334155; }
+    .idle-stop-field input[type="number"] {
+      width: 5rem; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 8px;
+      font-size: 1rem;
+    }
+    .idle-stop-field .idle-stop-hint { color: #64748b; font-size: 0.9rem; margin: 0; flex: 1 1 220px; }
+    .gpu-model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 12px 0; }
+    .gpu-model-grid fieldset { border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin: 0; }
+    .gpu-model-option { display: block; margin: 6px 0; font-size: 0.92rem; cursor: pointer; }
+    .deploy-stop-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 8px; }
+    .deploy-stop-metrics { font-size: 0.9rem; color: #475569; }
+    .serverless-region-field {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+      margin: 0 0 16px; padding: 14px 16px; background: #f0f9ff;
+      border: 1px solid #bae6fd; border-radius: 10px;
+    }
+    .serverless-region-field label { font-weight: 600; color: #0c4a6e; }
+    .serverless-region-field select {
+      min-width: 280px; padding: 8px 10px; border: 1px solid #cbd5e1;
+      border-radius: 8px; font-size: 0.95rem;
+    }
+    .serverless-region-field .region-hint { color: #64748b; font-size: 0.9rem; margin: 0; flex: 1 1 220px; }
+    .gpu-serverless-notice {
+      background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 12px 14px; margin: 12px 0;
+      color: #0c4a6e; font-size: 0.92rem;
+    }
+    .compute-policy-fields { display: flex; flex-direction: column; gap: 12px; margin: 0 0 20px; }
   </style>
 </head>
 <body>
@@ -53,9 +85,15 @@
     </div>
     <main class="gpu-page">
       <h1>Cloud compute selection</h1>
+      {% set is_serverless = report.compute_mode == 'serverless' %}
       <p class="gpu-meta">
+        {% if is_serverless %}
+        Choose serverless pipeline models and <strong>one RunPod GPU row</strong> for cost estimates and saved hardware metadata.
+        Deploy creates a RunPod Serverless endpoint (scale-to-zero) and runs a model warmup — not a Community/Secure pod.
+        {% else %}
         Choose <strong>one</strong> row from either list (GPU or CPU). Save records your choice in
         <code>data/compute_selection.json</code> and starts deploy (RunPod pod create, or AWS manual instructions).
+        {% endif %}
       </p>
       <div class="gpu-actions">
         <button type="button" onclick="location.reload()">Refresh catalog</button>
@@ -65,11 +103,29 @@
       {% for err in report.errors %}
       <p class="gpu-error">{{ err }}</p>
       {% endfor %}
+      {% if is_serverless and not report.serverless_image_configured %}
+      <section class="gpu-card" role="note">
+        <h3>Worker image</h3>
+        <p class="gpu-meta">
+          Pick <strong>Custom worker</strong> to auto build/push with Docker, or <strong>Existing registry image</strong>
+          to skip Docker (paste an image you deployed from RunPod Hub/GitHub or Docker Hub).
+          RunPod Hub Whisper/Ollama templates are not drop-in replacements for this app's combined worker.
+        </p>
+      </section>
+      {% endif %}
 
-      {% if report.saved_selection and report.saved_selection.offer %}
+      {% if is_serverless %}
+      <section class="gpu-card saved" id="serverlessSavedPanel">
+        <h3>Currently selected</h3>
+        <div id="serverlessSavedInner">
+          {% set saved_display = report.serverless_saved_display or {'kind': 'none'} %}
+          {% include "partials/serverless_saved_display.html" %}
+        </div>
+      </section>
+      {% elif report.saved_selection and report.saved_selection.offer %}
+      {% set s = report.saved_selection.offer %}
       <section class="gpu-card saved">
         <h3>Currently selected</h3>
-        {% set s = report.saved_selection.offer %}
         <p>
           <strong>{{ s.name }}</strong> ({{ s.kind|upper }}) — {{ s.cloud }}
           — ${{ "%.3f"|format(s.price_per_hour) }}/hr
@@ -94,7 +150,15 @@
           <strong>Approach:</strong> rule-based only (no LLM). Uses live catalog fields plus
           <code>WHISPER_MODEL</code> / <code>SUMMARIZATION_MODEL</code> from config to explain each category.
           Click <strong>Select</strong> to check a suggestion against the lists below.
+          {% if is_serverless %}
+          Picks are for the <strong>region shown in the dropdown</strong> (serverless catalog, not Community/Secure pods).
+          {% endif %}
         </p>
+        <div id="serverlessRecommendationsInner">
+        {% if is_serverless %}
+          {% set recommendations = report.recommendations or {'categories': [], 'recommended_gpu_for_pipeline': none} %}
+          {% include "partials/serverless_recommendations.html" %}
+        {% else %}
         {% set primary = report.recommendations.recommended_gpu_for_pipeline %}
         {% if primary %}
         <p class="rec-top">
@@ -133,16 +197,150 @@
           {% endfor %}
           </tbody>
         </table>
+        {% endif %}
+        </div>
+      </section>
+      {% endif %}
+
+      {% set rp = report.runpod_platform %}
+      {% if rp %}
+      <section class="gpu-card">
+        <h3>RunPod cost &amp; lifecycle (platform-native)</h3>
+        <p class="gpu-meta">{{ rp.idle_auto_stop_note }}</p>
+        <p class="gpu-meta">
+          <a href="{{ rp.idle_monitor_url }}" target="_blank" rel="noopener">RunPod Idle Pod Monitor</a>
+          ·
+          <a href="{{ rp.serverless_idle_docs_url }}" target="_blank" rel="noopener">Serverless idleTimeout</a>
+        </p>
+        <p class="gpu-meta">{{ rp.spend_cap_note }}</p>
+        <p class="gpu-meta">
+          <a href="{{ rp.billing_docs_url }}" target="_blank" rel="noopener">RunPod billing &amp; spend limits</a>
+        </p>
+        <p class="gpu-meta">
+          This app does <strong>not</strong> enforce idle stop or spend caps locally — configure them in RunPod.
+          Serverless deploy uses <code>RUNPOD_COMPUTE_MODE=serverless</code> and <code>RUNPOD_SERVERLESS_IMAGE</code>
+          (see <code>docs/RUNPOD_SERVERLESS.md</code>).
+        </p>
       </section>
       {% endif %}
 
       <form id="computeSelectForm">
+        {% if report.serverless_model_catalog %}
+        <section class="gpu-card">
+          <h2 class="section-title">Serverless pipeline models</h2>
+          <p class="gpu-meta">
+            Choose Whisper, Ollama, and NLLB for the GPU worker. Saving deploys the endpoint and runs a
+            <strong>cold-start warmup</strong> (loads all three) so the summarizer is ready afterward.
+          </p>
+          {% set sm = report.serverless_models_saved %}
+          {% set cat = report.serverless_model_catalog %}
+          <div class="gpu-model-grid">
+            <fieldset>
+              <legend><strong>Whisper</strong></legend>
+              {% for m in cat.whisper %}
+              <label class="gpu-model-option">
+                <input type="radio" name="ss_whisper" value="{{ m.id }}"
+                  {% if m.id == sm.whisper %}checked{% endif %} required>
+                {{ m.label }}
+              </label>
+              {% endfor %}
+            </fieldset>
+            <fieldset>
+              <legend><strong>Ollama (summarize)</strong></legend>
+              {% for m in cat.ollama %}
+              <label class="gpu-model-option">
+                <input type="radio" name="ss_ollama" value="{{ m.id }}"
+                  {% if m.id == sm.ollama %}checked{% endif %} required>
+                {{ m.label }}
+              </label>
+              {% endfor %}
+            </fieldset>
+            <fieldset>
+              <legend><strong>NLLB</strong></legend>
+              {% for m in cat.nllb %}
+              <label class="gpu-model-option">
+                <input type="radio" name="ss_nllb" value="{{ m.id }}"
+                  {% if m.id == sm.nllb %}checked{% endif %} required>
+                {{ m.label }}
+              </label>
+              {% endfor %}
+            </fieldset>
+          </div>
+          <fieldset style="margin-top:16px;">
+            <legend><strong>Worker Docker image</strong></legend>
+            {% for opt in cat.worker_image_sources %}
+            <label class="gpu-model-option">
+              <input type="radio" name="ss_worker_image_source" value="{{ opt.id }}"
+                {% if opt.id == (sm.worker_image_source or 'custom_build') %}checked{% endif %} required>
+              {{ opt.label }}
+            </label>
+            {% endfor %}
+            <div id="registryImageField" style="margin-top:10px;">
+              <label class="gpu-meta" for="ssRegistryImage">Container image (when using registry — no Docker)</label>
+              <input type="text" id="ssRegistryImage" name="ss_registry_image" style="width:100%;max-width:520px;padding:8px;"
+                placeholder="docker.io/youruser/video-summarizer-worker:v1.0.0"
+                value="{{ sm.registry_image or report.serverless_image_value or '' }}">
+            </div>
+            <div style="margin-top:10px;">
+              <label class="gpu-meta" for="ssDockerHubUser">Docker Hub username (custom build push target)</label>
+              <input type="text" id="ssDockerHubUser" name="docker_hub_user" style="width:100%;max-width:320px;padding:8px;"
+                placeholder="your-dockerhub-username"
+                autocomplete="username"
+                value="{{ report.docker_hub_user or '' }}">
+              <p class="gpu-meta">Saved to <code>.env</code> as <code>DOCKER_HUB_USER</code> on deploy. Image:
+                <code id="dockerHubPushPreview">{{ report.docker_hub_user or 'username' }}/video-summarizer-worker:v1.0.0</code></p>
+            </div>
+            <p class="gpu-meta" style="margin-top:10px;">{{ cat.combined_worker_note }}</p>
+            <details class="gpu-meta" style="margin-top:8px;">
+              <summary>RunPod Hub templates (Whisper / Ollama / vLLM — separate APIs)</summary>
+              <ul style="margin:8px 0 0 16px;">
+              {% for h in cat.runpod_hub_workers %}
+                <li><a href="{{ h.console_url }}" target="_blank" rel="noopener">{{ h.name }}</a> — {{ h.models }}. {{ h.notes }}</li>
+              {% endfor %}
+              </ul>
+            </details>
+          </fieldset>
+        </section>
+        {% endif %}
+
         <div class="gpu-actions">
           <button type="submit" class="primary" id="saveDeployBtn">Save selection &amp; deploy</button>
           <span id="deployMessage" class="gpu-meta" role="status"></span>
         </div>
 
-        <h2 class="section-title">Available GPUs</h2>
+        <h2 class="section-title">RunPod GPUs (pick one)</h2>
+        {% if is_serverless %}
+        {% if report.serverless_datacenters %}
+        <div class="serverless-region-field">
+          <label for="serverlessRegionSelect">Region / data center</label>
+          <select id="serverlessRegionSelect" name="serverless_data_center_id" aria-describedby="serverlessRegionHint">
+            {% for dc in report.serverless_datacenters %}
+            <option value="{{ dc.data_center_id }}"
+              {% if dc.data_center_id == report.serverless_selected_data_center_id %}selected{% endif %}>
+              {{ dc.data_center_name }} ({{ dc.data_center_id }})
+            </option>
+            {% endfor %}
+          </select>
+          <p id="serverlessRegionHint" class="region-hint">
+            Changing region queries RunPod live for that data center (not cached).
+            {% if report.serverless_deploy_env and report.serverless_deploy_env.data_center_id %}
+            Initial default from <code>RUNPOD_DATA_CENTER_ID</code> when nothing is saved yet.
+            {% endif %}
+          </p>
+          <span id="serverlessRegionStatus" class="gpu-meta" role="status"></span>
+        </div>
+        {% endif %}
+        <div class="gpu-serverless-notice" role="note">
+          GPU list, recommendations, and saved-offer pricing refresh from RunPod when you change region.
+          Extra pools from <code>RUNPOD_SERVERLESS_GPU_POOLS</code> are still merged on deploy when set in <code>.env</code>.
+        </div>
+        <div id="serverlessGpuCatalog">
+          {% set serverless_sections = report.serverless_sections %}
+          {% set default_selection_id = report.serverless_default_selection_id %}
+          {% include "partials/serverless_gpu_catalog.html" %}
+        </div>
+        <p class="gpu-meta">Region catalog fetched: <span id="serverlessCatalogFetchedAt">{{ report.fetched_at }}</span></p>
+        {% else %}
         {% set gpu_sections = [
           ('runpod-community', 'RunPod Community Cloud'),
           ('runpod-secure', 'RunPod Secure Cloud'),
@@ -178,7 +376,9 @@
         </section>
         {% endif %}
         {% endfor %}
+        {% endif %}
 
+        {% if not is_serverless %}
         <h2 class="section-title">Available CPUs</h2>
         {% set cpu_sections = [
           ('runpod-cpu-secure', 'RunPod CPU-only pods (Secure)'),
@@ -225,6 +425,7 @@
         </section>
         {% endif %}
         {% endfor %}
+        {% endif %}
       </form>
 
       <p class="gpu-meta">Last updated: {{ report.fetched_at }}</p>
@@ -239,7 +440,50 @@
 
       let recFallbackRadio = null;
 
-      function selectById(selectionId, offerJson) {
+      let regionFetchSeq = 0;
+
+      async function refreshServerlessRegion(dcId) {
+        if (!dcId) return;
+        const seq = ++regionFetchSeq;
+        const statusEl = document.getElementById("serverlessRegionStatus");
+        const catalogEl = document.getElementById("serverlessGpuCatalog");
+        if (statusEl) statusEl.textContent = "Loading live catalog from RunPod…";
+        if (catalogEl) catalogEl.setAttribute("aria-busy", "true");
+        try {
+          const res = await fetch(
+            "/api/gpu-selection/serverless-region?data_center_id=" + encodeURIComponent(dcId),
+            { cache: "no-store", headers: { Accept: "application/json" } }
+          );
+          const data = await res.json();
+          if (seq !== regionFetchSeq) return;
+          if (!res.ok || !data.html) {
+            if (statusEl) statusEl.textContent = data.error || "Failed to load region catalog.";
+            return;
+          }
+          if (catalogEl) catalogEl.innerHTML = data.html.gpu_catalog;
+          const recEl = document.getElementById("serverlessRecommendationsInner");
+          if (recEl) recEl.innerHTML = data.html.recommendations;
+          const savedEl = document.getElementById("serverlessSavedInner");
+          if (savedEl) savedEl.innerHTML = data.html.saved_display;
+          const tsEl = document.getElementById("serverlessCatalogFetchedAt");
+          if (tsEl && data.fetched_at) tsEl.textContent = data.fetched_at;
+          if (statusEl) {
+            statusEl.textContent =
+              (data.regional_row_count != null ? data.regional_row_count + " GPU options in this region." : "Catalog updated.");
+          }
+        } catch (err) {
+          if (seq === regionFetchSeq && statusEl) statusEl.textContent = String(err);
+        } finally {
+          if (seq === regionFetchSeq && catalogEl) catalogEl.removeAttribute("aria-busy");
+        }
+      }
+
+      function selectById(selectionId, offerJson, serverlessDc) {
+        const regionSelect = document.getElementById("serverlessRegionSelect");
+        if (regionSelect && serverlessDc && regionSelect.value !== serverlessDc) {
+          regionSelect.value = serverlessDc;
+          refreshServerlessRegion(serverlessDc);
+        }
         const radios = form.querySelectorAll('input[name="selection_id"]');
         for (let i = 0; i < radios.length; i++) {
           if (radios[i].value === selectionId) {
@@ -268,18 +512,38 @@
         return null;
       }
 
-      document.querySelectorAll("tr.selectable-row").forEach(function (row) {
-        row.addEventListener("click", function (ev) {
+      const regionSelect = document.getElementById("serverlessRegionSelect");
+      if (regionSelect) {
+        regionSelect.addEventListener("change", function () {
+          refreshServerlessRegion(regionSelect.value);
+        });
+      }
+
+      const dockerHubInput = document.getElementById("ssDockerHubUser");
+      const dockerHubPreview = document.getElementById("dockerHubPushPreview");
+      if (dockerHubInput && dockerHubPreview) {
+        dockerHubInput.addEventListener("input", function () {
+          const u = dockerHubInput.value.trim() || "username";
+          dockerHubPreview.textContent = u + "/video-summarizer-worker:v1.0.0";
+        });
+      }
+
+      document.addEventListener("click", function (ev) {
+        const btn = ev.target.closest(".pick-rec-btn");
+        if (btn) {
+          selectById(
+            btn.getAttribute("data-selection-id"),
+            btn.getAttribute("data-offer"),
+            btn.getAttribute("data-serverless-dc")
+          );
+          return;
+        }
+        const row = ev.target.closest("tr.selectable-row");
+        if (row && form && form.contains(row)) {
           if (ev.target.tagName === "INPUT") return;
           const radio = row.querySelector('input[type="radio"]');
           if (radio) radio.checked = true;
-        });
-      });
-
-      document.querySelectorAll(".pick-rec-btn").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          selectById(btn.getAttribute("data-selection-id"), btn.getAttribute("data-offer"));
-        });
+        }
       });
 
       form.addEventListener("submit", async function (ev) {
@@ -291,23 +555,50 @@
           return;
         }
         saveBtn.disabled = true;
-        msg.textContent = "Saving and starting deploy…";
+        msg.textContent =
+          "Building/pushing worker image if needed, then deploying serverless (may take 15–30+ minutes)…";
         msg.className = "gpu-meta";
         let offer = null;
+        const whisperEl = form.querySelector('input[name="ss_whisper"]:checked');
+        const ollamaEl = form.querySelector('input[name="ss_ollama"]:checked');
+        const nllbEl = form.querySelector('input[name="ss_nllb"]:checked');
+        const workerSrcEl = form.querySelector('input[name="ss_worker_image_source"]:checked');
+        const registryEl = document.getElementById("ssRegistryImage");
+        const dockerHubEl = document.getElementById("ssDockerHubUser");
+        const serverlessModels =
+          whisperEl && ollamaEl && nllbEl
+            ? {
+                whisper: whisperEl.value,
+                ollama: ollamaEl.value,
+                nllb: nllbEl.value,
+                worker_image_source: workerSrcEl ? workerSrcEl.value : "custom_build",
+                registry_image: registryEl ? registryEl.value.trim() : "",
+              }
+            : null;
         const offerJson = offerJsonForPicked(picked);
         if (offerJson) {
           try { offer = JSON.parse(offerJson); } catch (e) { offer = null; }
         }
+        const regionEl = document.getElementById("serverlessRegionSelect");
+        const serverlessDc = regionEl ? regionEl.value : null;
         try {
           const res = await fetch("/api/gpu-selection", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ selection_id: picked.value, offer: offer }),
+            body: JSON.stringify({
+              selection_id: picked.value,
+              offer: offer,
+              serverless_models: serverlessModels,
+              serverless_data_center_id: serverlessDc,
+              docker_hub_user: dockerHubEl ? dockerHubEl.value.trim() : "",
+            }),
           });
           const data = await res.json();
           if (data.ok) {
             msg.textContent = data.deploy?.message || "Saved.";
             msg.className = "gpu-success";
+            const regionElAfter = document.getElementById("serverlessRegionSelect");
+            if (regionElAfter) refreshServerlessRegion(regionElAfter.value);
             if (window.DeployStatusUI) {
               window.DeployStatusUI.startDeployStatusPolling(data.deploy_status);
             }
@@ -315,8 +606,17 @@
               window.history.replaceState({}, "", "/gpu-selection?deploy=ok");
             }
           } else {
-            msg.textContent = data.error || data.deploy?.message || "Deploy failed.";
+            let errText = data.error || data.deploy?.message || "Deploy failed.";
+            const dp = data.docker_publish || data.deploy?.docker_publish;
+            if (dp && dp.steps && dp.steps.length) {
+              errText += " Steps: " + dp.steps.join(" → ");
+            }
+            if (dp && dp.build_log_tail) {
+              errText += "\n\n" + String(dp.build_log_tail).slice(-1500);
+            }
+            msg.textContent = errText;
             msg.className = "gpu-error";
+            msg.style.whiteSpace = "pre-wrap";
           }
         } catch (err) {
           msg.textContent = String(err);

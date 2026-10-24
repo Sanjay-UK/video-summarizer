@@ -83,6 +83,50 @@ class LocalPipelineExecutor(PipelineExecutor):
         translate_summary_for_languages(job_output_dir, summary_text, langs)
 
 
+class ServerlessRunpodPipelineExecutor(PipelineExecutor):
+    mode = "hybrid_runpod"
+
+    def run_heavy_phase(
+        self,
+        *,
+        job_id: str,
+        audio_path: Path,
+        job_output_dir: Path,
+        whisper_model: str,
+        summarization_model: str,
+        compression: str,
+        highlight_languages: str,
+        log: Callable[[str], None],
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from src.runpod_serverless import (
+            load_endpoint_id_from_selection,
+            run_heavy_phase_via_serverless,
+            save_job_metrics_to_selection,
+        )
+
+        endpoint_id = load_endpoint_id_from_selection()
+        result = run_heavy_phase_via_serverless(
+            endpoint_id=endpoint_id,
+            job_id=job_id,
+            audio_path=audio_path,
+            job_output_dir=job_output_dir,
+            whisper_model=whisper_model,
+            summarization_model=summarization_model,
+            compression=compression,
+            highlight_languages=highlight_languages,
+            log=log,
+        )
+        metrics = {
+            "delayTime": result.get("delayTime"),
+            "executionTime": result.get("executionTime"),
+            "runpod_job_id": result.get("id"),
+            "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        save_job_metrics_to_selection(metrics)
+
+
 class HybridRunpodPipelineExecutor(PipelineExecutor):
     mode = "hybrid_runpod"
 
@@ -100,7 +144,6 @@ class HybridRunpodPipelineExecutor(PipelineExecutor):
     ) -> None:
         log("Heavy steps: RunPod GPU (Whisper CUDA, Ollama summarize, Google/NLLB summary translation)")
         log("Light steps stay local (TTS, highlights, FFmpeg, UI)")
-
         transport = os.environ.get("RUNPOD_REMOTE_TRANSPORT", "auto").strip().lower()
         use_jupyter = transport in ("http", "jupyter")
         if transport == "auto":
@@ -217,6 +260,10 @@ class HybridRunpodPipelineExecutor(PipelineExecutor):
 
 def build_executor(runtime_ctx: dict[str, Any]) -> PipelineExecutor:
     if runtime_ctx.get("mode") == "hybrid_runpod":
+        from src.compute_deploy import COMPUTE_MODE_SERVERLESS, load_compute_mode
+
+        if load_compute_mode() == COMPUTE_MODE_SERVERLESS:
+            return ServerlessRunpodPipelineExecutor()
         return HybridRunpodPipelineExecutor()
     return LocalPipelineExecutor()
 

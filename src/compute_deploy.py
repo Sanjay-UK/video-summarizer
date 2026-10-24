@@ -22,10 +22,22 @@ RUNPOD_PODS_URL = "https://api.runpod.io/v2/pods"
 DEFAULT_RUNPOD_IMAGE = (
     "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 )
+COMPUTE_MODE_POD = "pod"
+COMPUTE_MODE_SERVERLESS = "serverless"
+VALID_COMPUTE_MODES = frozenset({COMPUTE_MODE_POD, COMPUTE_MODE_SERVERLESS})
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def load_compute_mode() -> str:
+    """RunPod deploy target: serverless (default) or legacy pod."""
+    saved = load_saved_selection()
+    if saved and saved.get("compute_mode") in VALID_COMPUTE_MODES:
+        return str(saved["compute_mode"])
+    mode = os.environ.get("RUNPOD_COMPUTE_MODE", COMPUTE_MODE_SERVERLESS).strip().lower()
+    return mode if mode in VALID_COMPUTE_MODES else COMPUTE_MODE_SERVERLESS
 
 
 def load_saved_selection() -> dict[str, Any] | None:
@@ -44,7 +56,7 @@ def _write_selection(payload: dict[str, Any]) -> None:
 
 def _find_offer_in_catalog(selection_id: str) -> dict[str, Any] | None:
     report = build_gpu_selection_report()
-    for key in ("gpu_offers", "cpu_offers"):
+    for key in ("gpu_offers", "cpu_offers", "serverless_gpu_rows"):
         for row in report.get(key) or []:
             if row.get("selection_id") == selection_id:
                 return row
@@ -177,6 +189,132 @@ def _build_runpod_pod_body(offer: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def _serverless_placement_from_offer(offer: dict[str, Any]) -> tuple[str, list[str]]:
+    dc = (offer.get("data_center_id") or "").strip() or os.environ.get(
+        "RUNPOD_DATA_CENTER_ID", ""
+    ).strip()
+    pool = (offer.get("serverless_pool") or "").strip()
+    if pool:
+        pools = [pool]
+        extra = os.environ.get("RUNPOD_SERVERLESS_GPU_POOLS", "").strip()
+        for p in extra.split(","):
+            p = p.strip()
+            if p and p not in pools:
+                pools.append(p)
+    else:
+        from src.runpod_serverless import _gpu_pools_from_env
+
+        pools = _gpu_pools_from_env()
+    if not dc:
+        raise RuntimeError(
+            "Serverless data center required: pick a serverless GPU row or set RUNPOD_DATA_CENTER_ID"
+        )
+    return dc, pools
+
+
+def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
+    from src.runpod_serverless import (
+        create_network_volume,
+        create_serverless_endpoint,
+        serverless_worker_image,
+    )
+
+    try:
+        dc, pools = _serverless_placement_from_offer(offer)
+    except RuntimeError as exc:
+        return {
+            "status": "failed",
+            "message": str(exc),
+            "pod_id": "",
+            "endpoint_id": "",
+            "network_volume_id": "",
+            "provider_response": {},
+        }
+
+    try:
+        serverless_worker_image()
+    except RuntimeError as exc:
+        return {
+            "status": "failed",
+            "message": str(exc),
+            "pod_id": "",
+            "endpoint_id": "",
+            "network_volume_id": "",
+            "data_center_id": dc,
+            "serverless_gpu_pools": pools,
+            "provider_response": {},
+        }
+
+    saved = load_saved_selection() or {}
+    prior_deploy = saved.get("deploy") or {}
+    volume_id = os.environ.get("RUNPOD_NETWORK_VOLUME_ID", "").strip()
+    if not volume_id:
+        volume_id = (prior_deploy.get("network_volume_id") or "").strip()
+    prior_dc = (prior_deploy.get("data_center_id") or "").strip()
+    if not prior_dc and volume_id:
+        prior_dc = (
+            str(saved.get("serverless_data_center_id") or "").strip()
+            or str(offer.get("data_center_id") or "").strip()
+        )
+    if volume_id and prior_dc and prior_dc != dc:
+        return {
+            "status": "failed",
+            "message": (
+                f"Saved network volume is in {prior_dc}; selected data center is {dc}. "
+                "Delete the volume or pick a GPU in the same data center."
+            ),
+            "pod_id": "",
+            "endpoint_id": "",
+            "network_volume_id": volume_id,
+            "provider_response": {},
+        }
+    if not volume_id:
+        suffix = (offer.get("name") or "gpu")[:24].replace(" ", "-")
+        vol = create_network_volume(name_suffix=f"-{suffix}", data_center_id=dc)
+        volume_id = str(vol.get("id") or "")
+        if not volume_id:
+            return {
+                "status": "failed",
+                "message": "RunPod network volume create returned no id",
+                "pod_id": "",
+                "endpoint_id": "",
+                "network_volume_id": "",
+                "provider_response": vol,
+            }
+
+    try:
+        ep = create_serverless_endpoint(
+            network_volume_id=volume_id,
+            gpu_offer_name=str(offer.get("name") or ""),
+            data_center_id=dc,
+            gpu_pools=pools,
+        )
+    except RuntimeError as exc:
+        return {
+            "status": "failed",
+            "message": str(exc),
+            "pod_id": "",
+            "endpoint_id": "",
+            "network_volume_id": volume_id,
+            "data_center_id": dc,
+            "serverless_gpu_pools": pools,
+            "provider_response": {},
+        }
+
+    endpoint_id = str(ep.get("id") or "")
+    return {
+        "status": "deployed",
+        "message": f"RunPod serverless endpoint created ({endpoint_id}). Workers scale to zero when idle.",
+        "pod_id": "",
+        "endpoint_id": endpoint_id,
+        "network_volume_id": volume_id,
+        "request_urls": ep.get("requestUrls") or {},
+        "data_center_id": dc,
+        "serverless_gpu_pools": pools,
+        "provider_response": ep,
+    }
+
+
 def _deploy_runpod(offer: dict[str, Any], api_key: str) -> dict[str, Any]:
     cloud_type = _runpod_cloud_type(offer.get("cloud", ""))
     try:
@@ -247,9 +385,79 @@ def mark_saved_deploy_stopped(
     return True
 
 
-def stop_saved_runpod_pod() -> dict[str, Any]:
-    """Terminate the RunPod pod from the saved selection file (DELETE /v2/pods/{id})."""
+def stop_saved_runpod_workers() -> dict[str, Any]:
+    """Scale serverless workers to zero (stop GPU billing for workers)."""
     load_env_file()
+    saved = load_saved_selection()
+    if not saved:
+        return {"ok": False, "error": "No saved deployment in data/compute_selection.json"}
+    if load_compute_mode() != COMPUTE_MODE_SERVERLESS:
+        return {"ok": False, "error": "Not a serverless deployment"}
+    deploy = saved.get("deploy") or {}
+    endpoint_id = (deploy.get("endpoint_id") or "").strip()
+    if not endpoint_id:
+        return {"ok": False, "error": "No endpoint_id in saved deploy record"}
+
+    from src.runpod_serverless import stop_serverless_workers
+
+    try:
+        stop_serverless_workers(endpoint_id)
+    except RuntimeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    deploy["message"] = f"Serverless workers scaled to 0 for endpoint {endpoint_id}."
+    deploy["updated_at"] = _utc_now()
+    deploy["workers_stopped_at"] = deploy["updated_at"]
+    saved["deploy"] = deploy
+    _write_selection(saved)
+    return {"ok": True, "endpoint_id": endpoint_id, "message": deploy["message"]}
+
+
+def delete_saved_network_volume(*, confirm: str) -> dict[str, Any]:
+    """Detach volume from endpoint and permanently delete it (cached models lost)."""
+    load_env_file()
+    if confirm.strip().upper() != "DELETE":
+        return {
+            "ok": False,
+            "error": 'Confirmation required: send {"confirm": "DELETE"} to delete the network volume.',
+        }
+    saved = load_saved_selection()
+    if not saved:
+        return {"ok": False, "error": "No saved deployment"}
+    deploy = saved.get("deploy") or {}
+    volume_id = (deploy.get("network_volume_id") or "").strip()
+    if not volume_id:
+        return {"ok": False, "error": "No network_volume_id in saved deploy record"}
+    endpoint_id = (deploy.get("endpoint_id") or "").strip()
+
+    from src.runpod_serverless import (
+        delete_network_volume,
+        detach_network_volume_from_endpoint,
+        stop_serverless_workers,
+    )
+
+    try:
+        if endpoint_id:
+            stop_serverless_workers(endpoint_id)
+            detach_network_volume_from_endpoint(endpoint_id)
+        delete_network_volume(volume_id)
+    except RuntimeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    deploy["network_volume_id"] = ""
+    deploy["message"] = f"Network volume {volume_id} deleted. Model cache on volume is gone."
+    deploy["updated_at"] = _utc_now()
+    saved["deploy"] = deploy
+    _write_selection(saved)
+    return {"ok": True, "volume_id": volume_id, "message": deploy["message"]}
+
+
+def stop_saved_runpod_pod() -> dict[str, Any]:
+    """Stop RunPod compute: serverless workers → 0, or terminate legacy pod."""
+    load_env_file()
+    if load_compute_mode() == COMPUTE_MODE_SERVERLESS:
+        return stop_saved_runpod_workers()
+
     saved = load_saved_selection()
     if not saved:
         return {"ok": False, "error": "No saved deployment in data/compute_selection.json"}
@@ -289,6 +497,9 @@ def stop_saved_runpod_pod() -> dict[str, Any]:
 def save_selection_and_deploy(
     selection_id: str,
     client_offer: dict[str, Any] | None = None,
+    serverless_models: dict[str, Any] | None = None,
+    serverless_data_center_id: str | None = None,
+    docker_hub_user: str | None = None,
 ) -> dict[str, Any]:
     """Save one GPU or CPU choice and run the provider deploy flow."""
     load_env_file()
@@ -309,18 +520,76 @@ def save_selection_and_deploy(
             "deploying using the selection_id you chose."
         )
 
+    compute_mode = load_compute_mode()
+    dc_override = (serverless_data_center_id or "").strip()
+    if compute_mode == COMPUTE_MODE_SERVERLESS and dc_override:
+        offer_dc = (offer.get("data_center_id") or "").strip()
+        if offer_dc and offer_dc != dc_override:
+            return {
+                "ok": False,
+                "error": (
+                    f"Selected GPU is in {offer_dc}; region dropdown is {dc_override}. "
+                    "Pick a GPU row in the chosen region or change the region."
+                ),
+            }
+        offer = {**offer, "data_center_id": dc_override}
+
     saved_at = _utc_now()
     prior = load_saved_selection() or {}
+    models_normalized: dict[str, str] | None = None
+    if compute_mode == COMPUTE_MODE_SERVERLESS:
+        from src.serverless_model_catalog import normalize_serverless_models
+
+        models_normalized = normalize_serverless_models(serverless_models)
     record: dict[str, Any] = {
         "selection_id": selection_id,
         "saved_at": saved_at,
+        "compute_mode": compute_mode,
+        "serverless_data_center_id": dc_override or (offer.get("data_center_id") or ""),
+        "serverless_models": models_normalized,
         "offer": offer,
         "in_stock_at_save": in_stock,
         "catalog_note": catalog_note,
         "pipeline_runtime": prior.get("pipeline_runtime") or "local",
-        "deploy": {"status": "pending", "message": "Starting deploy…", "pod_id": "", "updated_at": saved_at},
+        "deploy": {
+            "status": "pending",
+            "message": "Starting deploy…",
+            "pod_id": "",
+            "endpoint_id": "",
+            "network_volume_id": "",
+            "updated_at": saved_at,
+        },
     }
     _write_selection(record)
+
+    docker_hub_apply: dict[str, Any] | None = None
+    if compute_mode == COMPUTE_MODE_SERVERLESS and docker_hub_user is not None:
+        from src.serverless_worker_image_publish import apply_docker_hub_user
+
+        docker_hub_apply = apply_docker_hub_user(docker_hub_user)
+        if not docker_hub_apply.get("ok"):
+            err = docker_hub_apply.get("error") or "Invalid Docker Hub username"
+            deploy = {
+                "status": "failed",
+                "message": err,
+                "pod_id": "",
+                "endpoint_id": "",
+                "network_volume_id": "",
+                "updated_at": _utc_now(),
+            }
+            record["deploy"] = deploy
+            record["docker_hub_user"] = docker_hub_apply
+            _write_selection(record)
+            return {
+                "ok": False,
+                "error": err,
+                "docker_hub_user": docker_hub_apply,
+                "selection_id": selection_id,
+                "saved_selection": record,
+                "deploy": deploy,
+            }
+        if docker_hub_apply.get("user"):
+            record["docker_hub_user"] = docker_hub_apply.get("user")
 
     provider = offer.get("provider")
     if provider == "runpod":
@@ -332,6 +601,123 @@ def save_selection_and_deploy(
                 "pod_id": "",
                 "updated_at": _utc_now(),
             }
+        elif compute_mode == COMPUTE_MODE_SERVERLESS:
+            from src.runpod_serverless import serverless_image_registry_ready
+            from src.serverless_worker_image_publish import (
+                ensure_serverless_worker_image,
+                sync_serverless_env_from_selection,
+            )
+
+            sync_serverless_env_from_selection()
+            publish_info: dict[str, Any] | None = None
+            worker_source = (
+                (models_normalized or {}).get("worker_image_source") or "custom_build"
+            )
+            registry_image = ((models_normalized or {}).get("registry_image") or "").strip()
+            current_image = os.environ.get("RUNPOD_SERVERLESS_IMAGE", "").strip()
+            if worker_source == "registry":
+                from src.serverless_worker_image_publish import apply_registry_image
+
+                img = registry_image or current_image
+                publish_info = apply_registry_image(img)
+                record["docker_publish"] = publish_info
+                if not publish_info.get("ok"):
+                    err = publish_info.get("error") or "Invalid registry image"
+                    deploy = {
+                        "status": "failed",
+                        "message": err,
+                        "pod_id": "",
+                        "endpoint_id": "",
+                        "network_volume_id": "",
+                        "docker_publish": publish_info,
+                        "updated_at": _utc_now(),
+                    }
+                    record["deploy"] = deploy
+                    _write_selection(record)
+                    return {
+                        "ok": False,
+                        "error": err,
+                        "docker_publish": publish_info,
+                        "selection_id": selection_id,
+                        "saved_selection": record,
+                        "deploy": deploy,
+                    }
+                os.environ["RUNPOD_SERVERLESS_IMAGE"] = str(publish_info.get("image") or "")
+            elif not serverless_image_registry_ready(current_image):
+                record["deploy"] = {
+                    **record["deploy"],
+                    "status": "pending",
+                    "message": "Building and pushing serverless worker Docker image…",
+                    "updated_at": _utc_now(),
+                }
+                _write_selection(record)
+                publish_info = ensure_serverless_worker_image()
+                record["docker_publish"] = publish_info
+                if not publish_info.get("ok"):
+                    err = publish_info.get("error") or "Docker publish failed"
+                    tail = publish_info.get("build_log_tail")
+                    if tail:
+                        err = f"{err}\n\n--- build log (tail) ---\n{tail[-2000:]}"
+                    deploy = {
+                        "status": "failed",
+                        "message": err,
+                        "pod_id": "",
+                        "endpoint_id": "",
+                        "network_volume_id": "",
+                        "docker_publish": publish_info,
+                        "updated_at": _utc_now(),
+                    }
+                    record["deploy"] = deploy
+                    _write_selection(record)
+                    return {
+                        "ok": False,
+                        "error": err,
+                        "docker_publish": publish_info,
+                        "selection_id": selection_id,
+                        "saved_selection": record,
+                        "deploy": deploy,
+                    }
+                os.environ["RUNPOD_SERVERLESS_IMAGE"] = str(publish_info.get("image") or "")
+
+            deploy = _deploy_runpod_serverless(offer)
+            if publish_info:
+                deploy["docker_publish"] = publish_info
+            deploy["updated_at"] = _utc_now()
+            if deploy.get("status") == "deployed" and models_normalized:
+                endpoint_id = (deploy.get("endpoint_id") or "").strip()
+                if endpoint_id:
+                    deploy["warmup_status"] = "running"
+                    deploy["message"] = (
+                        f"{deploy.get('message', '')} Cold start: loading Whisper, Ollama, NLLB…"
+                    )
+                    record["deploy"] = deploy
+                    _write_selection(record)
+                    try:
+                        from src.runpod_serverless import run_warmup_cold_start, save_job_metrics_to_selection
+
+                        warmup = run_warmup_cold_start(
+                            endpoint_id,
+                            whisper_model=models_normalized["whisper"],
+                            ollama_model=models_normalized["ollama"],
+                            nllb_model=models_normalized["nllb"],
+                        )
+                        deploy["warmup_status"] = "completed"
+                        deploy["message"] = (
+                            f"Serverless ready. Models loaded (delayTime "
+                            f"{warmup.get('delayTime')} ms)."
+                        )
+                        metrics = {
+                            "delayTime": warmup.get("delayTime"),
+                            "executionTime": warmup.get("executionTime"),
+                            "runpod_job_id": warmup.get("id"),
+                            "recorded_at": _utc_now(),
+                            "phase": "warmup",
+                        }
+                        deploy["last_job_metrics"] = metrics
+                        save_job_metrics_to_selection(metrics)
+                    except Exception as exc:
+                        deploy["warmup_status"] = "failed"
+                        deploy["message"] = f"Deploy OK but warmup failed: {exc}"
         else:
             deploy = _deploy_runpod(offer, api_key)
             deploy["updated_at"] = _utc_now()
@@ -349,7 +735,7 @@ def save_selection_and_deploy(
     record["deploy"] = deploy
     _write_selection(record)
 
-    return {
+    out: dict[str, Any] = {
         "ok": deploy.get("status") in ("deployed", "manual"),
         "selection_id": selection_id,
         "in_stock_at_save": in_stock,
@@ -357,3 +743,6 @@ def save_selection_and_deploy(
         "saved_selection": record,
         "deploy": deploy,
     }
+    if record.get("docker_publish"):
+        out["docker_publish"] = record["docker_publish"]
+    return out

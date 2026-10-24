@@ -379,6 +379,24 @@ def sync_project_via_jupyter(client: RunpodJupyterClient, project_dir: Path) -> 
         tmp.unlink(missing_ok=True)
 
 
+def bootstrap_runpod_heavy_environment(client: RunpodJupyterClient) -> None:
+    """Ensure faster-whisper is importable on the pod (once per pod)."""
+    marker = "video-summarizer/.vsumm_heavy_bootstrap_ok"
+    if client.remote_file_exists(marker):
+        return
+    client.execute(
+        "import pathlib, subprocess, sys\n"
+        "subprocess.run(\n"
+        "    [sys.executable, '-m', 'pip', 'install', '--root-user-action=ignore', 'faster-whisper'],\n"
+        "    check=False,\n"
+        ")\n"
+        "from faster_whisper import WhisperModel  # noqa: F401\n"
+        "pathlib.Path('video-summarizer/.vsumm_heavy_bootstrap_ok').touch()\n"
+        "print('bootstrap_ok')\n",
+        timeout=900,
+    )
+
+
 def run_heavy_phase_via_jupyter(
     *,
     job_id: str,
@@ -392,7 +410,9 @@ def run_heavy_phase_via_jupyter(
 ) -> None:
     client = build_jupyter_client()
     log("RunPod transport: Jupyter HTTP proxy (SSH unavailable from this network)")
-    sync_project_via_jupyter(client, project_dir=Path(__file__).resolve().parent.parent)
+    project_dir = Path(__file__).resolve().parent.parent
+    sync_project_via_jupyter(client, project_dir=project_dir)
+    bootstrap_runpod_heavy_environment(client)
 
     remote_root = os.environ.get("RUNPOD_REMOTE_JOBS_ROOT", "vsumm-jobs").strip().strip("/")
     remote_rel = f"{remote_root}/{job_id}"
@@ -417,20 +437,40 @@ def run_heavy_phase_via_jupyter(
     client.upload_file(f"{remote_rel}/{audio_path.name}", audio_path)
     client.upload_file(f"{remote_rel}/heavy_manifest.json", manifest_local)
 
-    app_root = os.environ.get("RUNPOD_REMOTE_APP_ROOT", "video-summarizer").strip().strip("/")
     done_rel = f"{remote_rel}/heavy_done.json"
     log_path = f"{remote_rel}/heavy_worker.log"
+    app_root_override = os.environ.get("RUNPOD_REMOTE_APP_ROOT", "").strip().strip("/")
 
     start_code = (
-        "import subprocess, pathlib, sys\n"
-        f"app = pathlib.Path('{app_root}')\n"
-        f"work = pathlib.Path('{remote_rel}')\n"
+        "import os, subprocess, pathlib, sys\n"
+        f"override = {app_root_override!r}\n"
+        "candidates = []\n"
+        "if override:\n"
+        "    candidates.append(pathlib.Path(override))\n"
+        "candidates.extend([\n"
+        "    pathlib.Path('/workspace/video-summarizer'),\n"
+        "    pathlib.Path('video-summarizer'),\n"
+        "])\n"
+        "app = None\n"
+        "for cand in candidates:\n"
+        "    try:\n"
+        "        resolved = cand.expanduser().resolve()\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "    if (resolved / 'scripts/runpod_heavy_worker.py').is_file():\n"
+        "        app = resolved\n"
+        "        break\n"
+        "if app is None:\n"
+        "    raise SystemExit('runpod_heavy_worker.py not found under /workspace/video-summarizer or video-summarizer')\n"
+        f"work = pathlib.Path('{remote_rel}').resolve()\n"
         f"log = open('{log_path}', 'w')\n"
+        "worker = app / 'scripts/runpod_heavy_worker.py'\n"
+        "env = {**os.environ, 'RUNPOD_WORKER_TRANSCRIBE_ONLY': '1', 'WHISPER_DEVICE': 'cuda'}\n"
         "proc = subprocess.Popen(\n"
-        f"    [sys.executable, str(app / 'scripts/runpod_heavy_worker.py'), '--workdir', str(work)],\n"
-        "    stdout=log, stderr=subprocess.STDOUT, cwd=str(app),\n"
+        "    [sys.executable, str(worker), '--workdir', str(work)],\n"
+        "    stdout=log, stderr=subprocess.STDOUT, cwd=str(app), env=env,\n"
         ")\n"
-        "print('started', proc.pid)\n"
+        "print('started', proc.pid, 'app', app)\n"
     )
     client.execute(start_code, timeout=120)
     log(f"RunPod Jupyter: heavy worker started (log {log_path})")
@@ -439,19 +479,55 @@ def run_heavy_phase_via_jupyter(
     while time.time() < deadline:
         if client.remote_file_exists(done_rel):
             break
+        if client.remote_file_exists(log_path):
+            try:
+                client.download_file(log_path, job_output_dir / "_heavy_worker.log")
+                tail = (job_output_dir / "_heavy_worker.log").read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                if any(
+                    needle in tail
+                    for needle in (
+                        "can't open file",
+                        "No such file or directory",
+                        "Missing audio",
+                        "Missing ",
+                        "[ERROR] ollama",
+                        "faster-whisper not installed",
+                        "Traceback (most recent call last)",
+                    )
+                ):
+                    snippet = tail.strip()[-800:]
+                    raise RuntimeError(
+                        f"RunPod heavy worker failed on pod (see heavy_worker.log): {snippet}"
+                    )
+            except RuntimeError:
+                raise
+            except OSError:
+                pass
         time.sleep(20)
         log("RunPod Jupyter: waiting for GPU heavy worker…")
     else:
         raise RuntimeError("RunPod heavy worker timed out (no heavy_done.json).")
 
-    for name in (
-        "transcript.txt",
-        "segments.json",
-        "summary.txt",
-        "summary_translations.json",
-        "heavy_done.json",
-    ):
+    for name in ("transcript.txt", "segments.json", "heavy_done.json"):
         client.download_file(f"{remote_rel}/{name}", job_output_dir / name)
 
     if not (job_output_dir / "transcript.txt").is_file():
         raise RuntimeError("Jupyter transport: heavy worker did not produce transcript.txt")
+
+    from src.locales import parse_language_list
+    from src.summary_translate import translate_summary_for_languages
+    from src.summarizer import summarize_transcript
+
+    log("RunPod Jupyter: transcribe done on GPU; summarizing locally (Ollama on this machine)")
+    summarize_transcript(
+        transcript_path=job_output_dir / "transcript.txt",
+        segments_path=job_output_dir / "segments.json",
+        output_dir=job_output_dir,
+        model=summarization_model,
+        compression=compression,
+    )
+    summary_text = (job_output_dir / "summary.txt").read_text(encoding="utf-8")
+    langs = parse_language_list(highlight_languages)
+    translate_summary_for_languages(job_output_dir, summary_text, langs)

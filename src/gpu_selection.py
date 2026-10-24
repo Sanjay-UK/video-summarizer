@@ -62,7 +62,29 @@ def load_env_file() -> None:
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def env_file_get(key: str) -> str:
+    """Read a single key from .env (for UI display; avoids stale os.environ)."""
+    env_path = PROJECT_DIR / ".env"
+    if not env_path.is_file():
+        return os.environ.get(key, "").strip()
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, value = line.partition("=")
+        if k.strip() == key:
+            return value.strip().strip('"').strip("'")
+    return os.environ.get(key, "").strip()
+
+
+def force_env_updates(updates: dict[str, str]) -> None:
+    """Apply keys to os.environ after .env was updated elsewhere."""
+    for key, value in updates.items():
+        if key:
             os.environ[key] = value
 
 
@@ -82,6 +104,10 @@ class ComputeOffer:
     memory_gb: int | None = None
     resource_id: str = ""
     notes: str = ""
+    data_center_id: str | None = None
+    data_center_name: str | None = None
+    serverless_pool: str | None = None
+    gpu_catalog_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -102,11 +128,20 @@ def parse_selection_id(selection_id: str) -> dict[str, Any] | None:
     if kind not in ("gpu", "cpu") or provider not in ("runpod", "aws") or not resource_id:
         return None
     display_name = resource_id
-    if provider == "runpod" and resource_id.startswith("NVIDIA "):
+    data_center_id: str | None = None
+    serverless_pool: str | None = None
+    gpu_catalog_id: str | None = None
+    if cloud == "runpod-serverless" and "|" in resource_id:
+        dc_part, pool_part, gpu_part = resource_id.split("|", 2)
+        data_center_id = dc_part
+        serverless_pool = pool_part
+        gpu_catalog_id = gpu_part
+        display_name = gpu_part.replace("NVIDIA ", "", 1) if gpu_part.startswith("NVIDIA ") else gpu_part
+    elif provider == "runpod" and resource_id.startswith("NVIDIA "):
         display_name = resource_id.replace("NVIDIA ", "", 1)
     elif provider == "aws":
         display_name = resource_id
-    return {
+    parsed: dict[str, Any] = {
         "kind": kind,
         "provider": provider,
         "cloud": cloud,
@@ -123,6 +158,13 @@ def parse_selection_id(selection_id: str) -> dict[str, Any] | None:
         "memory_gb": None,
         "notes": "Resolved from selection_id (not in latest in-stock catalog)",
     }
+    if data_center_id:
+        parsed["data_center_id"] = data_center_id
+    if serverless_pool:
+        parsed["serverless_pool"] = serverless_pool
+    if gpu_catalog_id:
+        parsed["gpu_catalog_id"] = gpu_catalog_id
+    return parsed
 
 
 def offer_to_dict(offer: ComputeOffer) -> dict[str, Any]:
@@ -309,7 +351,69 @@ def build_gpu_selection_report() -> dict[str, Any]:
     errors = [e for e in (runpod_gpu_error, runpod_cpu_error) if e]
 
     saved = load_saved_selection()
-    recommendations = build_category_recommendations(runpod_gpus + aws_gpus, runpod_cpus + aws_cpus)
+    from src.compute_deploy import COMPUTE_MODE_SERVERLESS, load_compute_mode
+
+    compute_mode = load_compute_mode()
+    from src.runpod_platform_controls import platform_controls_status
+    from src.serverless_model_catalog import catalog_for_ui, load_saved_serverless_models
+
+    env_dc = os.environ.get("RUNPOD_DATA_CENTER_ID", "").strip()
+    env_pools = os.environ.get("RUNPOD_SERVERLESS_GPU_POOLS", "ADA_24,AMPERE_16").strip()
+    env_serverless_image = os.environ.get("RUNPOD_SERVERLESS_IMAGE", "").strip()
+    from src.runpod_serverless import serverless_image_registry_ready
+    serverless_deploy_env: dict[str, str] | None = None
+    serverless_gpu_rows: list[dict[str, Any]] = []
+    serverless_datacenters: list[dict[str, str]] = []
+    serverless_sections: list[dict[str, Any]] = []
+    serverless_selected_data_center_id = ""
+    serverless_default_selection_id: str | None = None
+
+    serverless_saved_display: dict[str, Any] | None = None
+
+    if compute_mode == COMPUTE_MODE_SERVERLESS:
+        from src.runpod_serverless_catalog import (
+            fetch_serverless_gpu_offers,
+            list_serverless_datacenters,
+            resolve_initial_serverless_datacenter,
+        )
+        from src.serverless_gpu_region import assemble_serverless_region_payload
+
+        serverless_deploy_env = {
+            "data_center_id": env_dc,
+            "gpu_pools": env_pools,
+        }
+        serverless_gpu_rows, sl_err = fetch_serverless_gpu_offers(api_key)
+        if sl_err:
+            errors.append(sl_err)
+        serverless_datacenters = list_serverless_datacenters(serverless_gpu_rows)
+        serverless_selected_data_center_id = resolve_initial_serverless_datacenter(
+            saved=saved,
+            env_data_center_id=env_dc,
+            datacenters=serverless_datacenters,
+        )
+        deploy_status = (saved or {}).get("deploy")
+        region_bundle = assemble_serverless_region_payload(
+            serverless_gpu_rows,
+            sl_err,
+            serverless_selected_data_center_id,
+            saved=saved,
+            deploy_status=deploy_status if isinstance(deploy_status, dict) else None,
+            env_gpu_pools=env_pools,
+        )
+        serverless_sections = region_bundle.get("serverless_sections") or []
+        serverless_default_selection_id = region_bundle.get("default_selection_id")
+        serverless_saved_display = region_bundle.get("saved_display")
+        from src.serverless_gpu_region import EMPTY_SERVERLESS_RECOMMENDATIONS
+
+        recommendations = region_bundle.get("recommendations") or dict(
+            EMPTY_SERVERLESS_RECOMMENDATIONS
+        )
+    else:
+        from src.gpu_recommendations import build_category_recommendations
+
+        recommendations = build_category_recommendations(
+            runpod_gpus + aws_gpus, runpod_cpus + aws_cpus
+        )
 
     return {
         "min_vram_gb": MIN_VRAM_GB,
@@ -325,4 +429,18 @@ def build_gpu_selection_report() -> dict[str, Any]:
         "saved_selection_id": (saved or {}).get("selection_id"),
         "deploy_status": (saved or {}).get("deploy"),
         "fetched_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "runpod_platform": platform_controls_status(),
+        "serverless_model_catalog": catalog_for_ui(),
+        "serverless_models_saved": load_saved_serverless_models(),
+        "compute_mode": compute_mode,
+        "serverless_deploy_env": serverless_deploy_env,
+        "serverless_gpu_rows": serverless_gpu_rows,
+        "serverless_datacenters": serverless_datacenters,
+        "serverless_sections": serverless_sections,
+        "serverless_selected_data_center_id": serverless_selected_data_center_id,
+        "serverless_default_selection_id": serverless_default_selection_id,
+        "serverless_saved_display": serverless_saved_display,
+        "serverless_image_configured": serverless_image_registry_ready(env_serverless_image),
+        "serverless_image_value": env_serverless_image if env_serverless_image else None,
+        "docker_hub_user": env_file_get("DOCKER_HUB_USER"),
     }

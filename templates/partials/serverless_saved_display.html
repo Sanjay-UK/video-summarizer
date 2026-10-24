@@ -1,0 +1,41 @@
+{% if saved_display.kind == 'legacy_pod' %}
+<p class="gpu-meta">
+  No serverless GPU saved yet. A legacy pod choice (<strong>{{ saved_display.offer.name }}</strong>,
+  {{ saved_display.offer.cloud }}) is on file but is <strong>not</strong> used for serverless deploy.
+</p>
+{% elif saved_display.kind == 'serverless_other_region' %}
+<p class="gpu-meta">
+  Saved serverless GPU <strong>{{ saved_display.offer.name }}</strong> is in region
+  <strong>{{ saved_display.saved_data_center_id }}</strong> (viewing <strong>{{ saved_display.viewing_data_center_id }}</strong>).
+  Switch the dropdown to that region or pick a GPU here and save.
+</p>
+<p class="gpu-meta">
+  {{ saved_display.offer.name }} — serverless
+  {% if saved_display.offer.price_per_hour is not none %}${{ "%.3f"|format(saved_display.offer.price_per_hour) }}/hr{% endif %}
+  {% if saved_display.offer.serverless_pool %} · pool {{ saved_display.offer.serverless_pool }}{% endif %}
+</p>
+{% elif saved_display.kind == 'serverless' %}
+{% set s = saved_display.offer %}
+<p>
+  <strong>{{ s.name }}</strong> — serverless ${{ "%.3f"|format(s.price_per_hour) }}/hr
+  {% if s.vram_gb %} · {{ s.vram_gb }} GB VRAM{% endif %}
+</p>
+<p class="gpu-meta">
+  Region:
+  <strong>{{ s.data_center_name or s.data_center_id or '—' }}</strong>
+  {% if s.data_center_id %} ({{ s.data_center_id }}){% endif %}
+  {% if s.serverless_pool %} · pool <code>{{ s.serverless_pool }}</code>{% endif %}
+  {% if s.cloud_badges %} · {{ s.cloud_badges }}{% elif s.notes %} · {{ s.notes }}{% endif %}
+</p>
+{% if saved_display.deploy_status %}
+<p class="gpu-meta">
+  Deploy: <strong>{{ saved_display.deploy_status.status }}</strong>
+  — {{ saved_display.deploy_status.message }}
+  {% if saved_display.deploy_status.endpoint_id %} — Endpoint: {{ saved_display.deploy_status.endpoint_id }}{% endif %}
+  {% if saved_display.deploy_status.network_volume_id %} · Volume: {{ saved_display.deploy_status.network_volume_id }}{% endif %}
+</p>
+{% endif %}
+<p class="gpu-meta">Saved at {{ saved_display.saved_at }}</p>
+{% else %}
+<p class="gpu-meta">No serverless GPU saved yet — pick a row below and save.</p>
+{% endif %}
