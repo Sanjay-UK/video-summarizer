@@ -163,7 +163,7 @@ Key settings live in `config.py` if you want to tune behavior:
 
 ## Optional: S3 source-video storage for RunPod highlights
 
-Off by default. Local mode and the current worker (`v1.0.9`) are unaffected. When on, the source video is
+Off by default. Local mode and the current worker (`v1.0.11`) are unaffected. When on, the source video is
 uploaded to S3 and the worker downloads it through a presigned URL that expires (default 3600 s), instead of
 receiving the video bytes in the request.
 
