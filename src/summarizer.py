@@ -1,6 +1,7 @@
 """Summarize transcripts using Ollama/Llama with intelligent prompt engineering."""
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Union
@@ -98,6 +99,50 @@ def chunk_text(text: str, max_tokens: int = 2500):
     return chunks if chunks else [text]
 
 
+_PRIORITY_TAG_RE = re.compile(r"\[(CRITICAL|IMPORTANT|SUPPORTING)\]", re.IGNORECASE)
+_BULLET_PREFIX_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)])\s+")
+
+
+def parse_ranked_concepts(raw: str) -> list:
+    """Parse the model's ranked-concept output into (priority, text) pairs.
+
+    Accepts the formats the model actually produces:
+      [CRITICAL] Concept: explanation             (tag inline, the prompt's format)
+      * [IMPORTANT] Concept: explanation          (bullet before the tag)
+      **[SUPPORTING]** Concept: explanation       (bold tag)
+      [CRITICAL]                                  (tag on its own line)
+      * Concept: explanation                      (bullets under that tag)
+
+    Untagged prose (preambles, "Extracted Concepts:" headers) is ignored. Only bullet lines
+    inherit a priority from a tag-only header, so ordinary sentences are never treated as concepts.
+    """
+    concepts = []
+    section_priority = None
+    for raw_line in raw.splitlines():
+        stripped = raw_line.strip()
+        is_bullet = _BULLET_PREFIX_RE.match(stripped) is not None
+        line = _BULLET_PREFIX_RE.sub("", stripped, count=1).replace("**", "").replace("__", "").strip()
+        if not line:
+            continue
+
+        match = _PRIORITY_TAG_RE.search(line)
+        if match:
+            priority = match.group(1).upper()
+            before, after = line[:match.start()].strip(), line[match.end():].strip()
+            text = (before + " " + after).strip() if before else after
+            text = text.strip(" :-–—").strip()
+            section_priority = priority
+            if text:
+                concepts.append((priority, text))
+            continue
+
+        if is_bullet and section_priority:
+            text = line.strip(" :-–—").strip()
+            if text:
+                concepts.append((section_priority, text))
+    return concepts
+
+
 def extract_and_rank_concepts(transcript: str, model: str = None, chunk_index: int = 0) -> str:
     """Extract and rank all concepts by importance using two-pass approach.
 
@@ -149,35 +194,44 @@ TRANSCRIPT:
 RANKED CONCEPTS:
 """
 
-        response = client.generate(
-            model=model,
-            prompt=prompt,
-            stream=False,
-            options={
-                "temperature": SUMMARY_TEMPERATURE,
-                "top_p": 0.9,
-                "num_ctx": 8192,
-            },
+        # The model sometimes ignores the format (or claims the transcript is missing). Retry once with
+        # an explicit format reminder; if that also yields nothing, fail instead of returning empty.
+        format_reminder = (
+            "\n\nYour previous answer had no usable ranked concepts. Reply ONLY with lines that start with "
+            "[CRITICAL], [IMPORTANT], or [SUPPORTING], followed by the concept. The transcript is above."
         )
+        ranked = []
+        concepts = ""
+        for attempt_prompt in (prompt, prompt + format_reminder):
+            response = client.generate(
+                model=model,
+                prompt=attempt_prompt,
+                stream=False,
+                options={
+                    "temperature": SUMMARY_TEMPERATURE,
+                    "top_p": 0.9,
+                    "num_ctx": 8192,
+                },
+            )
 
-        concepts = response.get("response", "").strip()
+            concepts = response.get("response", "").strip()
 
-        if not concepts:
-            raise RuntimeError("Empty response from Ollama")
+            if not concepts:
+                raise RuntimeError("Empty response from Ollama")
+
+            ranked = parse_ranked_concepts(concepts)
+            if ranked:
+                break
+            print(f"[WARN] No ranked concepts in attempt; retrying once with format reminder")
+
+        if not ranked:
+            # Fail loudly: an unparsed response must not turn into an empty summary.
+            raise RuntimeError(f"No ranked concepts found in model output: {concepts[:200]!r}")
 
         # Tag each concept line with its source chunk index so concepts from multiple
         # chunks can be aggregated, globally selected, then split back per chunk.
-        tagged_lines = []
-        for line in concepts.split('\n'):
-            stripped = line.strip()
-            if stripped.startswith('['):
-                # Insert chunk tag right after the priority tag, e.g. "[CRITICAL][chunk:0] ..."
-                close_idx = stripped.find(']')
-                if close_idx != -1:
-                    stripped = f"{stripped[:close_idx+1]}[chunk:{chunk_index}]{stripped[close_idx+1:]}"
-            tagged_lines.append(stripped)
-
-        return '\n'.join(tagged_lines)
+        # Output format: "[CRITICAL][chunk:0] Concept: explanation"
+        return '\n'.join(f"[{priority}][chunk:{chunk_index}] {text}" for priority, text in ranked)
 
     except Exception as e:
         print(f"[ERROR] Concept extraction failed: {e}")
@@ -537,6 +591,8 @@ def summarize_transcript(
             print(f"[WARN] Concept extraction failed for chunk {i+1}: {e}")
 
     aggregated_concepts = '\n'.join(all_concepts)
+    if not any(line.startswith('[') for line in aggregated_concepts.split('\n')):
+        raise RuntimeError("Concept extraction produced no ranked concepts for any chunk; no summary written.")
 
     # PASS 2: Select concepts ONCE globally, based on compression level.
     print(f"[INFO] Pass 2: Selecting concepts globally ({compression} compression)...")
@@ -571,6 +627,9 @@ def summarize_transcript(
     # No second LLM re-summarization pass here — that previously re-compressed
     # already-selected content and silently dropped topics.
     full_summary = "\n\n".join(summaries)
+    if not full_summary.strip():
+        # Never write an empty summary.txt that the job runner would report as completed.
+        raise RuntimeError("Summarization produced an empty summary; no outputs written.")
 
     print(f"[INFO] Linking summary to video timestamps...")
     linked_segments = link_summary_to_segments(full_summary, segments)

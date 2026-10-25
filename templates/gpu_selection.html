@@ -278,7 +278,7 @@
             <div id="registryImageField" style="margin-top:10px;">
               <label class="gpu-meta" for="ssRegistryImage">Container image (when using registry — no Docker)</label>
               <input type="text" id="ssRegistryImage" name="ss_registry_image" style="width:100%;max-width:520px;padding:8px;"
-                placeholder="docker.io/youruser/video-summarizer-worker:v1.0.0"
+                placeholder="docker.io/youruser/video-summarizer-worker:v1.0.6"
                 value="{{ sm.registry_image or report.serverless_image_value or '' }}">
             </div>
             <div style="margin-top:10px;">
@@ -288,7 +288,7 @@
                 autocomplete="username"
                 value="{{ report.docker_hub_user or '' }}">
               <p class="gpu-meta">Saved to <code>.env</code> as <code>DOCKER_HUB_USER</code> on deploy. Image:
-                <code id="dockerHubPushPreview">{{ report.docker_hub_user or 'username' }}/video-summarizer-worker:v1.0.0</code></p>
+                <code id="dockerHubPushPreview">{{ report.docker_hub_user or 'username' }}/video-summarizer-worker:v1.0.6</code></p>
             </div>
             <p class="gpu-meta" style="margin-top:10px;">{{ cat.combined_worker_note }}</p>
             <details class="gpu-meta" style="margin-top:8px;">

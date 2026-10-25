@@ -115,8 +115,19 @@ def generate_scene_narration(
         if last_exc:
             raise last_exc
         raise RuntimeError("no TTS voice attempted")
-    except Exception:
-        return _gtts_fallback(text, output_path, gtts_lang=loc.gtts_lang)
+    except Exception as edge_exc:
+        # Keep the primary (edge-tts) error: if gTTS also fails, the report must show why the first voice failed.
+        print(
+            f"[WARN] edge-tts failed ({type(edge_exc).__name__}: {edge_exc}); trying gTTS fallback",
+            file=sys.stderr,
+        )
+        try:
+            return _gtts_fallback(text, output_path, gtts_lang=loc.gtts_lang)
+        except Exception as gtts_exc:
+            raise RuntimeError(
+                f"Scene TTS failed for {loc.code}. edge-tts: {type(edge_exc).__name__}: {edge_exc}; "
+                f"gTTS fallback: {type(gtts_exc).__name__}: {gtts_exc}"
+            ) from gtts_exc
     finally:
         loop.close()
 

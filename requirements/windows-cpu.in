@@ -1,0 +1,9 @@
+# Windows x86-64 CPU environment. Same pins as mac-cpu.in.
+# Torch: the default PyPI wheel is CPU-only. For CUDA on a Windows GPU box, install torch==2.4.1 from the PyTorch index instead (not locked here).
+-r local.in
+torch==2.4.1
+transformers==4.49.0
+tokenizers==0.21.4
+huggingface-hub>=0.34.0,<1.0
+sentencepiece>=0.1.99
+accelerate>=0.25.0

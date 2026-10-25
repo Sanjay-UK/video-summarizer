@@ -22,12 +22,19 @@ SERVERLESS_NLLB_MODELS: list[dict[str, str]] = [
     {"id": NLLB_MODEL_ID, "label": "NLLB-200 distilled 600M (fixed worker build)"},
 ]
 
+HIGHLIGHT_RENDERING_SERVERLESS = "serverless"
+HIGHLIGHT_RENDERING_LOCAL = "local"
+HIGHLIGHT_RENDERING_CHOICES = frozenset(
+    {HIGHLIGHT_RENDERING_SERVERLESS, HIGHLIGHT_RENDERING_LOCAL}
+)
+
 DEFAULT_SERVERLESS_MODELS: dict[str, str] = {
     "whisper": "base",
     "ollama": "llama3.2:3b",
     "nllb": NLLB_MODEL_ID,
     "worker_image_source": "custom_build",
     "registry_image": "",
+    "highlight_rendering": HIGHLIGHT_RENDERING_SERVERLESS,
 }
 
 
@@ -57,13 +64,27 @@ def normalize_serverless_models(raw: dict[str, Any] | None) -> dict[str, Any]:
         env_img = os.environ.get("RUNPOD_SERVERLESS_IMAGE", "").strip()
         if env_img:
             registry_image = env_img
+    highlight = str(
+        src.get("highlight_rendering") or DEFAULT_SERVERLESS_MODELS["highlight_rendering"]
+    ).strip().lower()
+    if highlight not in HIGHLIGHT_RENDERING_CHOICES:
+        highlight = DEFAULT_SERVERLESS_MODELS["highlight_rendering"]
     return {
         "whisper": whisper,
         "ollama": ollama,
         "nllb": nllb,
         "worker_image_source": source,
         "registry_image": registry_image,
+        "highlight_rendering": highlight,
     }
+
+
+def serverless_highlight_on_worker() -> bool:
+    """True when deployed serverless mode should run FFmpeg/highlight on the GPU worker."""
+    if os.environ.get("RUNPOD_HIGHLIGHT_LOCAL", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    models = load_saved_serverless_models()
+    return models.get("highlight_rendering") == HIGHLIGHT_RENDERING_SERVERLESS
 
 
 def catalog_for_ui() -> dict[str, Any]:

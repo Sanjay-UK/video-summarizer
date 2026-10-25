@@ -17,3 +17,11 @@ venv/
 
 # Logs
 *.log
+
+# Local dependency caches and validation venv (not source)
+.cache/
+venv-mac/
+data/endpoint_leases/
+
+# AWS credential export kept locally, never committed
+aws-video-summarizer_accessKeys.csv

@@ -159,6 +159,14 @@ def _load_or_build_shared(
     return scenes, visuals, english_texts
 
 
+def summarize_narration_voices(narration_manifest: list) -> list:
+    """Distinct narration voices used across scenes, e.g. ["en-US-GuyNeural"] or ["gtts:en"].
+
+    Recorded in the language status so a failed or fallback TTS run shows which provider produced the audio.
+    """
+    return sorted({str(s.get("tts_voice") or "unknown") for s in narration_manifest})
+
+
 def _write_lang_failure(
     job_output_dir: Path,
     lang: str,
@@ -283,6 +291,7 @@ def _render_language_media(
         "tts_seconds": round(tts_seconds, 3),
         "render_seconds": round(render_seconds, 3),
         "total_seconds": round(total, 3),
+        "narration_voices": summarize_narration_voices(narration_manifest),
     }
     (highlight_root / "language_status.json").write_text(
         json.dumps(success, indent=2),

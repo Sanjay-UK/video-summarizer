@@ -1,0 +1,10 @@
+# Local app extras (Flask UI, downloads, translation helpers). Not installed on the worker.
+-r common.in
+yt-dlp>=2025.10.14
+flask>=2.3.0
+gtts>=2.3.0
+Pillow>=10.0.0
+numpy>=1.24.0
+indic-transliteration>=2.3.0
+boto3>=1.34.0
+filelock>=3.13

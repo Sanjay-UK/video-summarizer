@@ -160,3 +160,70 @@ Key settings live in `config.py` if you want to tune behavior:
 | `SUMMARIZATION_MODEL` | `"llama3.2:3b"` | Default Ollama model used for summarization |
 | `OLLAMA_HOST` | `"http://localhost:11434"` | Where the app looks for the Ollama service |
 | `VIDEO_QUALITY` | `"360p"` | Download quality for YouTube videos |
+
+## Optional: S3 source-video storage for RunPod highlights
+
+Off by default. Local mode and the current worker (`v1.0.9`) are unaffected. When on, the source video is
+uploaded to S3 and the worker downloads it through a presigned URL that expires (default 3600 s), instead of
+receiving the video bytes in the request.
+
+**Credentials:** never put AWS keys in the repo, `.env`, logs, or prompts. The app always uses a named
+profile: `video-summarizer` by default, or the name in `VIDEO_S3_PROFILE`. It never uses the AWS `default`
+profile, and it ignores `AWS_PROFILE`. Create the profile on your machine
+yourself (you will be prompted for the key; nothing is stored in the project):
+
+    aws configure --profile video-summarizer
+
+**Read-only check (uploads and deletes nothing):**
+
+    VIDEO_S3_PROFILE=video-summarizer venv-mac/bin/python scripts/check_video_s3.py
+
+It confirms the caller identity, bucket region (`ap-south-1`), SSE-S3 encryption, public-access blocking,
+and that presigned URLs sign. It exits non-zero on any failure.
+
+**Settings** (set in your shell or local launch environment; the profile name is not a secret, so it may
+also go in `.env`):
+
+| Variable | Value | Notes |
+|---|---|---|
+| `VIDEO_S3_PROFILE` | `video-summarizer` | Named AWS profile to use |
+| `VIDEO_S3_BUCKET` | `video-summarizer-757374023708-ap-south-1-an` | Default already set in code |
+| `VIDEO_S3_REGION` | `ap-south-1` | Default already set in code |
+| `VIDEO_S3_PRESIGN_EXPIRES` | `3600` | Seconds; clamped to 60 s – 7 days |
+| `VIDEO_S3_ENABLED` | `true` | Turns storage on |
+| `VIDEO_S3_WORKER_URL_SUPPORT` | `true` | Set **only** after a worker image that accepts `video_url` jobs is deployed |
+
+Both `VIDEO_S3_ENABLED` and `VIDEO_S3_WORKER_URL_SUPPORT` must be `true`. Setting only the first one keeps
+storage off, so a single setting cannot break highlights on the current worker.
+
+**Behavior when on:** the source is uploaded with a unique key (UUID at the bucket root). The worker gets a
+presigned URL. The object is deleted only after the RunPod job completes. If the job fails, the object is
+kept and its key is recorded in the job folder (`s3_video.json`) for retry or manual cleanup. Presigned URLs
+are never written to disk.
+
+## Endpoint worker capacity (lease lifecycle)
+
+The app keeps the RunPod serverless endpoint at `max_workers=0` whenever it has no active job.
+
+- **How it works:** each job holds a lease from submission until it finishes. Success, failure, and timeout
+  all release it. Capacity goes to 0 only when no valid lease remains, and the change is read back from RunPod.
+- **Leases** are JSON files in `data/endpoint_leases/`, guarded by a `filelock` lock. The lock works the same
+  on macOS and Windows.
+- **Expiry:** a lease expires 4 hours after it was acquired. Expiry is age-based only, with no process checks.
+- **Startup:** when the app starts, it drops expired leases and, if none remain, sets capacity to 0 and
+  verifies it. A failure is printed as a warning and does not stop the app.
+- **While running:** the same check repeats every 5 minutes. It never lowers capacity while a valid lease exists.
+  This runs only while the app process is running. If the app is stopped or crashes, nothing lowers capacity
+  until it starts again.
+- **Capacity calls time out after 20 seconds**, so a slow RunPod response cannot hold the lock past the 60-second
+  wait that other jobs use.
+- **New endpoints are created with max workers 0**, then read back to confirm.
+- **A failed release never hides the job's own error.** The lease then expires on its own.
+- **Creating or reusing an endpoint** sets capacity to 0 and verifies it. If that cannot be verified, the
+  deploy is reported as failed.
+
+**Limitations:**
+- Coordination covers **one machine** that shares this project folder. Two machines using the same endpoint
+  cannot see each other's leases, and this is not supported.
+- Jobs started **outside this app** (RunPod console, other tools) hold no lease and are not tracked.
+- If the app crashes mid-job, capacity stays up until the next app start or the lease expires.

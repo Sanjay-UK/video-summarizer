@@ -1,0 +1,13 @@
+# gtts is locked separately (worker-gtts.lock) and installed with --no-deps: gtts 2.3.1+ caps click<8.2, which conflicts with runpod 1.12 (click>=8.4.2).
+
+# Regenerate worker.lock (Linux, cp311). Constraints keep deployed v1.0.6 versions and torch 2.4.1 from the base image:
+#   uv pip compile worker.in --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --generate-hashes \
+#     --constraint worker-constraints.txt --constraint worker-base-constraints.txt --no-emit-package torch --no-emit-package <nvidia-*/cuda-*/triton>
+# RunPod worker (Linux, CUDA). Torch comes from the runpod/pytorch base image, so it is NOT listed here.
+-r common.in
+runpod>=1.12.0
+transformers==4.49.0
+tokenizers==0.21.4
+huggingface-hub>=0.34.0,<1.0
+sentencepiece>=0.1.99
+accelerate>=0.25.0

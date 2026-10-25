@@ -40,6 +40,24 @@ def load_compute_mode() -> str:
     return mode if mode in VALID_COMPUTE_MODES else COMPUTE_MODE_SERVERLESS
 
 
+def saved_serverless_endpoint_id(saved: dict[str, Any] | None) -> str:
+    """The known serverless endpoint id: the explicit field, else the last deploy record's id."""
+    saved = saved or {}
+    explicit = str(saved.get("serverless_endpoint_id") or "").strip()
+    if explicit:
+        return explicit
+    return str((saved.get("deploy") or {}).get("endpoint_id") or "").strip()
+
+
+def warmup_required(deploy: dict[str, Any], models_normalized: dict[str, Any] | None) -> bool:
+    """A warmup job (which starts a paid worker) runs only for a newly created endpoint with models chosen."""
+    if deploy.get("status") != "deployed" or not models_normalized:
+        return False
+    if deploy.get("reused"):
+        return False
+    return bool(str(deploy.get("endpoint_id") or "").strip())
+
+
 def load_saved_selection() -> dict[str, Any] | None:
     if not SELECTION_PATH.is_file():
         return None
@@ -216,7 +234,11 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
     from src.runpod_serverless import (
         create_network_volume,
         create_serverless_endpoint,
+        endpoint_name_for,
+        find_serverless_endpoint,
+        list_serverless_endpoints,
         serverless_worker_image,
+        unique_endpoint_name,
     )
 
     try:
@@ -282,12 +304,60 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
                 "provider_response": vol,
             }
 
+    # Discover first: reuse the saved endpoint (or one with the same name) instead of creating a duplicate.
+    # Reuse never changes the endpoint's image or workers; a mismatch is reported, not applied.
+    target_name = endpoint_name_for(str(offer.get("name") or ""))
+    prior_endpoint_id = saved_serverless_endpoint_id(saved)
     try:
+        existing = find_serverless_endpoint(endpoint_id=prior_endpoint_id, name=target_name)
+        if existing:
+            existing_id = str(existing.get("id") or "")
+            configured_image = serverless_worker_image()
+            current_image = str(existing.get("image") or "")
+            note = ""
+            if current_image and current_image != configured_image:
+                note = (
+                    f" Endpoint image is {current_image}; configured image is {configured_image}. "
+                    "The image was not changed automatically."
+                )
+            from src.endpoint_capacity import lower_if_idle
+
+            capacity = lower_if_idle(existing_id, lambda _m: None)
+            if not capacity.ok:
+                return {
+                    "status": "failed",
+                    "message": (
+                        f"Found RunPod endpoint {existing_id} ({target_name}) but could not verify it is idle "
+                        f"(max workers 0): {capacity.message}. Check the endpoint in the RunPod console."
+                    ),
+                    "pod_id": "",
+                    "endpoint_id": "",
+                    "network_volume_id": volume_id,
+                    "data_center_id": dc,
+                    "serverless_gpu_pools": pools,
+                    "provider_response": {},
+                }
+            return {
+                "status": "deployed",
+                "reused": True,
+                # The endpoint is already warm or was warmed before; a save must not launch a warmup job.
+                "warmup_status": "skipped_reused",
+                "message": f"Reused existing RunPod endpoint {existing_id} ({target_name}); not recreated.{note}",
+                "pod_id": "",
+                "endpoint_id": existing_id,
+                "network_volume_id": volume_id,
+                "request_urls": existing.get("requestUrls") or {},
+                "data_center_id": dc,
+                "serverless_gpu_pools": pools,
+                "provider_response": existing,
+            }
+        taken = {str(e.get("name") or "") for e in list_serverless_endpoints()}
         ep = create_serverless_endpoint(
             network_volume_id=volume_id,
             gpu_offer_name=str(offer.get("name") or ""),
             data_center_id=dc,
             gpu_pools=pools,
+            name=unique_endpoint_name(target_name, taken),
         )
     except RuntimeError as exc:
         return {
@@ -302,9 +372,29 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
         }
 
     endpoint_id = str(ep.get("id") or "")
+    # The create body sets max workers to 3. Set it to 0 and read it back. A failed check is a failed deploy:
+    # the endpoint exists but may be running at max 3, so the user must see that.
+    from src.endpoint_capacity import lower_if_idle
+
+    capacity = lower_if_idle(endpoint_id, lambda _m: None)
+    if not capacity.ok:
+        return {
+            "status": "failed",
+            "message": (
+                f"RunPod endpoint {endpoint_id} was created, but max workers could not be verified as 0: "
+                f"{capacity.message}. Set max workers to 0 in the RunPod console, then save again."
+            ),
+            "pod_id": "",
+            "endpoint_id": "",
+            "network_volume_id": volume_id,
+            "data_center_id": dc,
+            "serverless_gpu_pools": pools,
+            "provider_response": ep,
+        }
     return {
         "status": "deployed",
-        "message": f"RunPod serverless endpoint created ({endpoint_id}). Workers scale to zero when idle.",
+        "reused": False,
+        "message": f"RunPod serverless endpoint created ({endpoint_id}). Max workers verified at 0 (idle).",
         "pod_id": "",
         "endpoint_id": endpoint_id,
         "network_volume_id": volume_id,
@@ -551,6 +641,8 @@ def save_selection_and_deploy(
         "in_stock_at_save": in_stock,
         "catalog_note": catalog_note,
         "pipeline_runtime": prior.get("pipeline_runtime") or "local",
+        # Keep the known endpoint across saves, so a failed or repeated save never erases the link.
+        "serverless_endpoint_id": saved_serverless_endpoint_id(prior),
         "deploy": {
             "status": "pending",
             "message": "Starting deploy…",
@@ -683,7 +775,7 @@ def save_selection_and_deploy(
             if publish_info:
                 deploy["docker_publish"] = publish_info
             deploy["updated_at"] = _utc_now()
-            if deploy.get("status") == "deployed" and models_normalized:
+            if warmup_required(deploy, models_normalized):
                 endpoint_id = (deploy.get("endpoint_id") or "").strip()
                 if endpoint_id:
                     deploy["warmup_status"] = "running"
@@ -732,6 +824,8 @@ def save_selection_and_deploy(
             "updated_at": _utc_now(),
         }
 
+    if deploy.get("status") == "deployed" and str(deploy.get("endpoint_id") or "").strip():
+        record["serverless_endpoint_id"] = str(deploy["endpoint_id"]).strip()
     record["deploy"] = deploy
     _write_selection(record)
 

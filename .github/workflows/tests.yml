@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 is Apple silicon (arm64), which matches requirements/mac-cpu.lock.
+        os: [macos-14, windows-latest]
+    env:
+      # Tests never call RunPod or AWS. This placeholder is not a secret.
+      RUNPOD_API_KEY: ci-placeholder-not-a-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: python -m pip install uv
+
+      - name: Install locked dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: uv pip install --system --require-hashes -r requirements/mac-cpu.lock
+
+      - name: Install locked dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: uv pip install --system --require-hashes -r requirements/windows-cpu.lock
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests -v

@@ -1,9 +1,8 @@
 runpod>=1.12.0
 faster-whisper>=1.0.0
 ollama>=0.6.0
-torch
-transformers
-sentencepiece
-accelerate
 pydub>=0.25.1
 deep-translator>=1.11.0
+edge-tts>=7.3.1
+# transformers / sentencepiece / accelerate: installed in Dockerfile with --no-deps
+# so pip does not overwrite CUDA torch from runpod/pytorch base (NLLB warmup needs it).

@@ -1,6 +1,6 @@
 # RunPod Serverless (video-summarizer)
 
-Heavy GPU work (Whisper, Ollama summarize, NLLB) runs on a **RunPod Serverless** queue endpoint. Flask stays local for TTS, highlights, and FFmpeg. Workers **scale to zero** when idle; billing is controlled on RunPod, not by whether your laptop is on.
+Heavy GPU work (Whisper, Ollama summarize, NLLB) and **highlight video** (Edge TTS, FFmpeg assembly) run on a **RunPod Serverless** queue endpoint when `highlight_rendering` is `serverless` (default). Flask stays local for download, audio extract, and orchestration. Workers **scale to zero** when idle; billing is controlled on RunPod, not by whether your laptop is on.
 
 ## Prerequisites
 
@@ -63,4 +63,6 @@ Legacy pods: set `RUNPOD_COMPUTE_MODE=pod`.
 
 ## Payload limit
 
-Async `/run` payload is ~10 MB. Short/medium MP3 via gzip+base64 is supported; very long audio may need a future volume-staging path.
+Async `/run` payload is ~10 MB. Audio and source video are gzip+base64; the app re-encodes when needed to fit (~9 MB safe limit). If video still does not fit, highlight rendering falls back to local FFmpeg. Set `RUNPOD_HIGHLIGHT_LOCAL=1` or `highlight_rendering: local` in saved serverless models to keep highlights on the laptop.
+
+Worker job types: `heavy_phase`, `highlight_phase`, `nllb_batch`, `warmup`.

@@ -29,7 +29,7 @@ from src.highlight_jobs import (
     read_highlight_status,
     write_highlight_status,
 )
-from src.highlight_pipeline import retry_highlight_languages, run_highlight_pipeline
+from src.highlight_pipeline import retry_highlight_languages
 from src.locales import LOCALES, parse_language_list
 from src.summary_jobs import clean_summary_text_for_display, summary_translations_for_api
 from src.summary_translate import summary_text_for_language, translate_summary_for_languages
@@ -377,13 +377,15 @@ def process_video(
                 job.set_step("highlight_visuals", 0.94)
                 job.add_log("Extracting scene visuals and narration...")
                 job.set_step("highlight_assembly", 0.97)
-                highlight_out = run_highlight_pipeline(
-                    staged_video,
-                    segments,
-                    job.job_output_dir,
-                    model=model,
+                highlight_out = executor.run_highlight_phase(
+                    job_id=job_id,
+                    video_path=staged_video,
+                    segments=segments,
+                    job_output_dir=job.job_output_dir,
+                    summarization_model=model,
                     compression=compression,
                     languages=lang_codes,
+                    log=job.add_log,
                 )
                 if isinstance(highlight_out, dict):
                     highlight_paths = dict(highlight_out)
@@ -985,6 +987,10 @@ if __name__ == "__main__":
     print("Starting Video Summarization Web App...")
     log_ffmpeg_subtitles_status_on_startup()
     log_runpod_ssh_health_on_startup()
+    from src.endpoint_capacity import start_background_recovery, startup_check
+
+    startup_check(print)  # prunes expired job leases; sets endpoint max workers to 0 when none remain
+    start_background_recovery(print)  # repeats that check every 5 min while the app runs
     _flask_debug = True
     print("Open: http://localhost:5000")
     app.run(debug=_flask_debug, host="0.0.0.0", port=5000)

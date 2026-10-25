@@ -27,8 +27,57 @@ from src.transcriber import transcribe_audio
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
+def _delete_s3_source(store: Any, job_output_dir: Path, key: str, log: Callable[[str], None]) -> None:
+    """Delete the uploaded source after a completed job. A failed delete is reported and the key is kept."""
+    from src import s3_video_store as s3
+
+    record = s3.read_record(job_output_dir)
+    try:
+        store.delete(key)
+        record.update({"status": "deleted", "deleted_at": s3.utc_now()})
+        log("Source video deleted from S3 after the worker finished.")
+    except Exception as exc:  # noqa: BLE001 — report, keep the key for manual cleanup
+        record.update({"status": "delete_failed", "delete_error": type(exc).__name__})
+        log(f"WARNING: could not delete S3 source ({type(exc).__name__}); key kept in {s3.S3_RECORD_NAME}.")
+    s3.write_record(job_output_dir, record)
+
+
+def _mark_s3_retained(job_output_dir: Path, key: str, log: Callable[[str], None]) -> None:
+    from src import s3_video_store as s3
+
+    record = s3.read_record(job_output_dir)
+    record.update({"status": "retained_after_failure", "retained_at": s3.utc_now()})
+    s3.write_record(job_output_dir, record)
+    log(f"S3 source kept for retry (key recorded in {s3.S3_RECORD_NAME}).")
+
+
 class PipelineExecutor(ABC):
     mode: str
+
+    def run_highlight_phase(
+        self,
+        *,
+        job_id: str,
+        video_path: Path,
+        segments: list[dict[str, Any]],
+        job_output_dir: Path,
+        summarization_model: str,
+        compression: str,
+        languages: list[str],
+        log: Callable[[str], None],
+    ) -> dict[str, Path] | Path:
+        from src.highlight_pipeline import run_highlight_pipeline
+
+        log("Highlight video: local machine (FFmpeg, TTS, assembly)")
+        out = run_highlight_pipeline(
+            video_path,
+            segments,
+            job_output_dir,
+            model=summarization_model,
+            compression=compression,
+            languages=languages,
+        )
+        return out if isinstance(out, dict) else {"en": out}
 
     @abstractmethod
     def run_heavy_phase(
@@ -125,6 +174,111 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
             "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         save_job_metrics_to_selection(metrics)
+
+    def run_highlight_phase(
+        self,
+        *,
+        job_id: str,
+        video_path: Path,
+        segments: list[dict[str, Any]],
+        job_output_dir: Path,
+        summarization_model: str,
+        compression: str,
+        languages: list[str],
+        log: Callable[[str], None],
+    ) -> dict[str, Path] | Path:
+        from src.serverless_model_catalog import serverless_highlight_on_worker
+
+        if not serverless_highlight_on_worker():
+            return super().run_highlight_phase(
+                job_id=job_id,
+                video_path=video_path,
+                segments=segments,
+                job_output_dir=job_output_dir,
+                summarization_model=summarization_model,
+                compression=compression,
+                languages=languages,
+                log=log,
+            )
+        from src.highlight_pipeline import _write_lang_failure
+        from src.runpod_serverless import (
+            load_endpoint_id_from_selection,
+            run_highlight_phase_via_serverless,
+        )
+
+        endpoint_id = load_endpoint_id_from_selection()
+        segments_json = json.dumps(segments)
+        lang_csv = ",".join(languages)
+
+        s3_key: str | None = None
+        s3_store = None
+        video_url: str | None = None
+        from src import s3_video_store as s3
+
+        if s3.s3_enabled():
+            # Source goes to S3 and the worker gets a presigned URL. The presigned URL is never logged or saved.
+            s3_store = s3.VideoStore(s3.settings_from_env())
+            s3_key = s3.make_object_key(video_path.name)
+            try:
+                s3_store.upload_source(video_path, s3_key)
+                s3.write_record(job_output_dir, {
+                    "bucket": s3_store.bucket, "key": s3_key, "status": "uploaded",
+                    "uploaded_at": s3.utc_now(), "deleted_at": None,
+                })
+                video_url = s3_store.presign_get(s3_key)
+                log(f"Source uploaded to S3 (key recorded in {s3.S3_RECORD_NAME}).")
+            except Exception as exc:
+                message = f"Source upload to S3 failed ({type(exc).__name__}); remote highlight was not started."
+                log(message)
+                for lang in languages:
+                    _write_lang_failure(job_output_dir, lang, message, failure_kind="s3_upload")
+                return {}
+
+        try:
+            run_highlight_phase_via_serverless(
+                endpoint_id=endpoint_id,
+                job_id=job_id,
+                video_path=video_path,
+                segments_json=segments_json,
+                job_output_dir=job_output_dir,
+                summarization_model=summarization_model,
+                compression=compression,
+                languages=lang_csv,
+                log=log,
+                video_url=video_url,
+            )
+        except Exception as exc:
+            # No silent local fallback: a locally rendered video must never be reported as a worker result.
+            # Each requested language is recorded as failed, so the UI and status show the real outcome.
+            message = f"RunPod worker highlight failed: {exc}"
+            log(message)
+            if s3_key and s3_store is not None:
+                # Keep the source so a retry can reuse it; the key is recorded for manual cleanup.
+                _mark_s3_retained(job_output_dir, s3_key, log)
+            for lang in languages:
+                _write_lang_failure(
+                    job_output_dir,
+                    lang,
+                    message,
+                    failure_kind="runpod_worker",
+                )
+            return {}
+        if s3_key and s3_store is not None:
+            # The RunPod job completed, so the worker has finished downloading the source.
+            _delete_s3_source(s3_store, job_output_dir, s3_key, log)
+        from src.highlight_jobs import highlight_file_for_lang
+
+        paths: dict[str, Path] = {}
+        for lang in languages:
+            mp4 = highlight_file_for_lang(job_output_dir, lang)
+            if mp4.is_file():
+                paths[lang] = mp4
+        missing = [lang for lang in languages if lang not in paths]
+        for lang in missing:
+            message = "RunPod worker returned no highlight file for this language."
+            log(message)
+            _write_lang_failure(job_output_dir, lang, message, failure_kind="runpod_worker")
+        return paths
 
 
 class HybridRunpodPipelineExecutor(PipelineExecutor):

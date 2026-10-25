@@ -180,7 +180,10 @@ def _serverless_deploy_status(
     *,
     refresh_live: bool,
 ) -> dict[str, Any]:
-    endpoint_id = (deploy.get("endpoint_id") or "").strip()
+    # Show the endpoint the app will use. A later failed save must not hide a known endpoint.
+    from src.compute_deploy import saved_serverless_endpoint_id
+
+    endpoint_id = (deploy.get("endpoint_id") or "").strip() or saved_serverless_endpoint_id(saved)
     out["endpoint_id"] = endpoint_id or None
     out["network_volume_id"] = (deploy.get("network_volume_id") or "").strip() or None
     out["stop_action_label"] = "Stop serverless"
@@ -302,6 +305,10 @@ def get_compute_deploy_status(refresh_live: bool = True) -> dict[str, Any]:
     }
 
     if compute_mode == COMPUTE_MODE_SERVERLESS and provider == "runpod":
+        # Set before the early returns below, so a failed or pending save still shows the known endpoint.
+        from src.compute_deploy import saved_serverless_endpoint_id
+
+        out["endpoint_id"] = saved_serverless_endpoint_id(saved) or None
         if deploy_result == "stopped":
             out["phase"] = "stopped"
             out["phase_label"] = "Stopped"

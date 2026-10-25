@@ -110,7 +110,9 @@ def resolve_runtime_for_job(requested: str | None = None) -> dict[str, Any]:
             "compute_mode": COMPUTE_MODE_SERVERLESS,
             "whisper_device": "cuda",
             "ollama_host": os.environ.get("RUNPOD_OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434",
-            "location_label": f"hybrid — heavy on RunPod serverless {endpoint_id}, light steps local",
+            "location_label": (
+                f"hybrid — heavy + highlight FFmpeg on RunPod serverless {endpoint_id}"
+            ),
             "heavy_location": "runpod_serverless",
             "light_location": "local",
             "runpod_endpoint_id": endpoint_id,

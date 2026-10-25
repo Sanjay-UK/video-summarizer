@@ -1,0 +1,10 @@
+# macOS arm64 CPU development environment.
+# Matches the worker's inference stack (Option B): torch 2.4.1, transformers 4.49.0.
+# transformers 4.50+ refuses torch.load on torch<2.6 (CVE-2025-32434).
+-r local.in
+torch==2.4.1
+transformers==4.49.0
+tokenizers==0.21.4
+huggingface-hub>=0.34.0,<1.0
+sentencepiece>=0.1.99
+accelerate>=0.25.0

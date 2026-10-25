@@ -114,7 +114,8 @@ def ffmpeg_has_subtitles_filter() -> bool:
         return False
     if result.returncode != 0:
         return False
-    return re.search(r"^\s*\.\.\s+subtitles\s+", result.stdout, re.MULTILINE) is not None
+    # Flag column width varies by build: macOS ffmpeg-full prints "..", Ubuntu ffmpeg 4.4 prints "...".
+    return re.search(r"^\s*[.TSC]{2,3}\s+subtitles\s+", result.stdout, re.MULTILINE) is not None
 
 
 def require_ffmpeg_subtitles_filter() -> None:
