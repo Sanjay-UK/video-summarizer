@@ -4,6 +4,7 @@
 import json
 import re
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Union
@@ -72,7 +73,7 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 
 jobs = {}
 job_history = []
-UPLOAD_DIR = Path("/tmp/videosummarizer_uploads")
+UPLOAD_DIR = Path(tempfile.gettempdir()) / "videosummarizer_uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 def enrich_history_entry(entry: dict) -> dict:
