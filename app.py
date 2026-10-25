@@ -539,7 +539,11 @@ def pipeline_runtime_api():
 @app.route("/api/compute-deploy-stop", methods=["POST"])
 def compute_deploy_stop_api():
     """Stop RunPod compute: scale serverless workers to 0 or terminate legacy pod."""
+    from src.serverless_status_cache import invalidate_all
+
     result = stop_saved_runpod_pod()
+    if result.get("ok"):
+        invalidate_all()  # only a confirmed change drops the cache; a failed call leaves it to expire by TTL
     status = 200 if result.get("ok") else 400
     if result.get("ok"):
         result["deploy_status"] = get_compute_deploy_status(refresh_live=False)
@@ -551,7 +555,11 @@ def compute_network_volume_delete_api():
     """Detach and delete the RunPod network volume (destroys cached model weights)."""
     data = request.get_json(silent=True) or {}
     confirm = (data.get("confirm") or request.form.get("confirm") or "").strip()
+    from src.serverless_status_cache import invalidate_all
+
     result = delete_saved_network_volume(confirm=confirm)
+    if result.get("ok"):
+        invalidate_all()
     status = 200 if result.get("ok") else 400
     if result.get("ok"):
         result["deploy_status"] = get_compute_deploy_status(refresh_live=False)
@@ -619,6 +627,8 @@ def gpu_selection_api():
     docker_hub_user = body.get("docker_hub_user")
     if docker_hub_user is not None and not isinstance(docker_hub_user, str):
         docker_hub_user = None
+    from src.serverless_status_cache import invalidate_all
+
     result = save_selection_and_deploy(
         selection_id,
         client_offer=client_offer,
@@ -626,6 +636,8 @@ def gpu_selection_api():
         serverless_data_center_id=serverless_dc,
         docker_hub_user=docker_hub_user,
     )
+    if result.get("ok"):
+        invalidate_all()  # the endpoint may have changed; the next status read must ask RunPod again
     if result.get("ok"):
         from src.compute_deploy import COMPUTE_MODE_SERVERLESS, load_compute_mode
         from src.pipeline_runtime import RUNTIME_RUNPOD, save_pipeline_runtime

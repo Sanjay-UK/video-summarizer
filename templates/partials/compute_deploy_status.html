@@ -1,195 +1,90 @@
+{% macro deploy_state_label(ds) -%}
+{%- if ds.runpod_error and ds.phase in ('ready', 'stopped') -%}Status unavailable
+{%- elif ds.phase == 'ready' -%}Configured
+{%- elif ds.phase == 'stopped' -%}Scaled to zero
+{%- elif ds.phase == 'deploying' -%}Deploying
+{%- elif ds.phase == 'failed' -%}Deployment failed
+{%- elif ds.phase == 'running' -%}Running
+{%- elif ds.phase == 'manual' -%}Manual setup
+{%- else -%}Status unknown
+{%- endif -%}
+{%- endmacro %}
 {% if deploy_status and deploy_status.show_deploy_banner %}
-<section class="deploy-status-banner deploy-status-{{ deploy_status.phase }}" id="computeDeployStatus" data-compute-mode="{{ deploy_status.compute_mode or '' }}">
-  <div class="deploy-status-header">
-    <span class="deploy-status-badge">{{ deploy_status.phase_label }}</span>
-    <strong>RunPod compute</strong>
-    {% if deploy_status.hardware.name %}
-      — {{ deploy_status.hardware.name }}
-      {% if deploy_status.hardware.vram_gb %}({{ deploy_status.hardware.vram_gb }} GB){% endif %}
+{% set ds = deploy_status %}
+{% set hw = ds.hardware or {} %}
+{% set live = ds.live %}
+{% set tone = live.tone if live else 'amber' %}
+<section class="gpu-card deploy-summary deploy-status-banner deploy-status-{{ ds.phase }}" id="computeDeployStatus" data-compute-mode="{{ ds.compute_mode or '' }}">
+  <div class="live-status live-tone-{{ tone }}" id="liveStatus" role="status" aria-live="polite">
+    <span class="live-dot" aria-hidden="true"></span>
+    <strong class="live-label">{{ live.label if live else deploy_state_label(ds) }}</strong>
+    {% if live and live.workers %}
+    <span class="live-workers">Reported: running {{ live.workers.running }} · idle {{ live.workers.idle }}</span>
     {% endif %}
-  </div>
-  <ul class="deploy-status-details">
-    {% if deploy_status.compute_mode == 'serverless' %}
-    <li><span class="deploy-status-k">Mode</span> RunPod Serverless (scale to zero)</li>
-    {% endif %}
-    {% if deploy_status.endpoint_id %}
-    <li><span class="deploy-status-k">Endpoint ID</span> <code>{{ deploy_status.endpoint_id }}</code></li>
-    {% endif %}
-    {% if deploy_status.network_volume_id %}
-    <li><span class="deploy-status-k">Network volume</span> <code>{{ deploy_status.network_volume_id }}</code></li>
-    {% endif %}
-    {% if deploy_status.last_delay_time_ms is not none %}
-    <li><span class="deploy-status-k">Last delayTime</span> {{ deploy_status.last_delay_time_ms }} ms</li>
-    {% endif %}
-    {% if deploy_status.last_execution_time_ms is not none %}
-    <li><span class="deploy-status-k">Last executionTime</span> {{ deploy_status.last_execution_time_ms }} ms</li>
-    {% endif %}
-    {% if deploy_status.pod_id %}
-    <li><span class="deploy-status-k">Pod ID</span> <code>{{ deploy_status.pod_id }}</code></li>
-    {% endif %}
-    {% if deploy_status.runpod_live_status %}
-    <li><span class="deploy-status-k">RunPod status</span> {{ deploy_status.runpod_live_status }}</li>
-    {% endif %}
-    {% if deploy_status.cost_per_hour is not none %}
-    <li><span class="deploy-status-k">Cost</span> ${{ "%.2f"|format(deploy_status.cost_per_hour) }}/hr</li>
-    {% elif deploy_status.hardware.price_per_hour %}
-    <li><span class="deploy-status-k">Est. cost</span> ${{ "%.2f"|format(deploy_status.hardware.price_per_hour) }}/hr</li>
-    {% endif %}
-    {% if deploy_status.data_center_id %}
-    <li><span class="deploy-status-k">Data center</span> {{ deploy_status.data_center_id }}</li>
-    {% endif %}
-    {% if deploy_status.idle_auto_stop_note %}
-    <li class="deploy-status-warn">
-      <span class="deploy-status-k">Idle stop</span> {{ deploy_status.idle_auto_stop_note }}
-      {% if deploy_status.idle_monitor_url %}
-      <a href="{{ deploy_status.idle_monitor_url }}" target="_blank" rel="noopener">Idle monitor</a>
-      {% endif %}
-    </li>
-    {% endif %}
-    {% if deploy_status.spend_cap_note %}
-    <li class="deploy-status-warn">
-      <span class="deploy-status-k">Spend cap</span> {{ deploy_status.spend_cap_note }}
-      {% if deploy_status.billing_docs_url %}
-      <a href="{{ deploy_status.billing_docs_url }}" target="_blank" rel="noopener">Billing</a>
-      {% endif %}
-    </li>
-    {% endif %}
-    {% if deploy_status.deploy_message %}
-    <li><span class="deploy-status-k">Last deploy</span> {{ deploy_status.deploy_message }}</li>
-    {% endif %}
-    {% if deploy_status.runpod_error %}
-    <li class="deploy-status-warn">{{ deploy_status.runpod_error }}</li>
-    {% endif %}
-  </ul>
-  <div class="deploy-status-links">
-    {% if deploy_status.console_url %}
-    <a href="{{ deploy_status.console_url }}" target="_blank" rel="noopener">Open in RunPod console</a>
-    {% endif %}
-    {% if deploy_status.ssh_command %}
-    <span class="deploy-status-k">SSH</span>
-    <code class="deploy-ssh-cmd">{{ deploy_status.ssh_command }}</code>
-    {% endif %}
+    <span class="live-checked">Last checked {{ live.checked_at if live else ds.checked_at }}</span>
     <button type="button" class="deploy-refresh-btn" id="refreshDeployStatusBtn">Refresh status</button>
-    {% if deploy_status.can_stop %}
-    <div class="deploy-stop-row">
-      <button type="button" class="deploy-stop-btn" id="stopDeployPodBtn">
-        {% if deploy_status.compute_mode == 'serverless' %}Stop serverless{% else %}{{ deploy_status.stop_action_label or 'Stop pod' }}{% endif %}
-      </button>
-      {% if deploy_status.compute_mode == 'serverless' %}
-      <span class="deploy-stop-metrics">
-        {% if deploy_status.serverless_idle_timeout_sec is not none %}
-        Idle timeout: {{ deploy_status.serverless_idle_timeout_sec }}s
-        {% endif %}
-        {% if deploy_status.serverless_max_cost_per_hour_usd is not none %}
-        {% if deploy_status.serverless_idle_timeout_sec is not none %} · {% endif %}
-        Max ~${{ "%.2f"|format(deploy_status.serverless_max_cost_per_hour_usd) }}/hr at full scale
-        {% endif %}
-      </span>
-      {% endif %}
-    </div>
-    {% endif %}
-    {% if deploy_status.can_delete_volume %}
-    <button type="button" class="deploy-delete-volume-btn" id="deleteNetworkVolumeBtn">Delete network volume</button>
-    {% endif %}
   </div>
-
-  {% if deploy_status.model_status and deploy_status.model_status.models %}
-  <div class="deploy-models-section">
-    <h4 class="deploy-models-title">Pipeline models</h4>
-    <p class="deploy-status-meta">{{ deploy_status.model_status.note }}</p>
-    <table class="deploy-models-table">
-      <thead>
-        <tr><th>Role</th><th>Engine</th><th>Model</th><th>Status</th></tr>
-      </thead>
-      <tbody>
-        {% for m in deploy_status.model_status.models %}
-        <tr>
-          <td>{{ m.role }}</td>
-          <td>{{ m.engine }}</td>
-          <td><code>{{ m.model }}</code>{% if m.detail %}<div class="deploy-status-meta">{{ m.detail }}</div>{% endif %}</td>
-          <td>{{ m.status }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  <p class="gpu-meta live-explanation" id="liveExplanation">{{ live.explanation if live else 'Status could not be read.' }}</p>
+  <dl class="deploy-facts">
+    <div><dt>GPU</dt><dd>{{ hw.name or 'Not selected' }}{% if hw.vram_gb %} · {{ hw.vram_gb }} GB{% endif %}</dd></div>
+    <div><dt>Region</dt><dd>{{ ds.data_center_id or 'Not set' }}</dd></div>
+    <div><dt>Rate</dt><dd>{% if hw.price_per_hour %}${{ "%.3f"|format(hw.price_per_hour) }}/hr per active worker (list price){% else %}Not available{% endif %}</dd></div>
+    <div><dt>Scaling</dt><dd>{% if ds.workers_min == 0 %}Scales to zero when idle{% elif ds.workers_min is none %}Unknown{% else %}Minimum {{ ds.workers_min }} worker(s){% endif %}</dd></div>
+    <div><dt>Max workers</dt><dd>{% if ds.workers_max is none %}Unknown{% else %}{{ ds.workers_max }} configured{% endif %}</dd></div>
+  </dl>
+  {% if ds.console_url %}
+  <div class="deploy-summary-actions">
+    <a href="{{ ds.console_url }}" target="_blank" rel="noopener">Open RunPod</a>
   </div>
   {% endif %}
 
-  <p class="deploy-status-meta">Checked {{ deploy_status.checked_at }}</p>
+  <details class="gpu-advanced deploy-advanced">
+    <summary>Advanced details</summary>
+    <ul class="deploy-status-details">
+      {% if ds.endpoint_id %}<li><span class="deploy-status-k">Endpoint ID</span> <code>{{ ds.endpoint_id }}</code></li>{% endif %}
+      {% if ds.network_volume_id %}<li><span class="deploy-status-k">Network volume</span> <code>{{ ds.network_volume_id }}</code></li>{% endif %}
+      {% if ds.pod_id %}<li><span class="deploy-status-k">Pod ID</span> <code>{{ ds.pod_id }}</code></li>{% endif %}
+      {% if ds.runpod_live_status %}<li><span class="deploy-status-k">RunPod status</span> {{ ds.runpod_live_status }}</li>{% endif %}
+      {% if ds.serverless_idle_timeout_sec is not none %}<li><span class="deploy-status-k">Idle timeout</span> {{ ds.serverless_idle_timeout_sec }} s</li>{% endif %}
+      {% if ds.last_delay_time_ms is not none %}<li><span class="deploy-status-k">Last delayTime</span> {{ ds.last_delay_time_ms }} ms</li>{% endif %}
+      {% if ds.last_execution_time_ms is not none %}<li><span class="deploy-status-k">Last executionTime</span> {{ ds.last_execution_time_ms }} ms</li>{% endif %}
+      {% if ds.warmup_status %}<li><span class="deploy-status-k">Warmup</span> {{ ds.warmup_status }}</li>{% endif %}
+      {% if ds.deploy_message %}<li><span class="deploy-status-k">Last deploy</span> {{ ds.deploy_message }}</li>{% endif %}
+      {% if ds.runpod_error %}<li class="deploy-status-warn">{{ ds.runpod_error }}</li>{% endif %}
+      {% if ds.ssh_command %}<li><span class="deploy-status-k">SSH</span> <code class="deploy-ssh-cmd">{{ ds.ssh_command }}</code></li>{% endif %}
+      {% if ds.idle_auto_stop_note %}<li class="deploy-status-warn"><span class="deploy-status-k">Idle stop</span> {{ ds.idle_auto_stop_note }}{% if ds.idle_monitor_url %} <a href="{{ ds.idle_monitor_url }}" target="_blank" rel="noopener">Idle monitor</a>{% endif %}</li>{% endif %}
+      {% if ds.spend_cap_note %}<li class="deploy-status-warn"><span class="deploy-status-k">Spend limits</span> {{ ds.spend_cap_note }}{% if ds.billing_docs_url %} <a href="{{ ds.billing_docs_url }}" target="_blank" rel="noopener">Billing docs</a>{% endif %}</li>{% endif %}
+    </ul>
+    <div class="deploy-stop-row">
+      {% if ds.can_stop %}
+      <button type="button" class="deploy-stop-btn" id="stopDeployPodBtn">
+        {% if ds.compute_mode == 'serverless' %}Scale workers to zero{% else %}{{ ds.stop_action_label or 'Stop pod' }}{% endif %}
+      </button>
+      {% endif %}
+      {% if ds.can_delete_volume %}
+      <button type="button" class="deploy-delete-volume-btn" id="deleteNetworkVolumeBtn">Delete network volume</button>
+      {% endif %}
+    </div>
+    {% if ds.model_status and ds.model_status.models %}
+    <div class="deploy-models-section">
+      <h4 class="deploy-models-title">Pipeline models on the endpoint</h4>
+      <p class="deploy-status-meta">{{ ds.model_status.note }}</p>
+      <table class="deploy-models-table">
+        <thead><tr><th>Role</th><th>Engine</th><th>Model</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for m in ds.model_status.models %}
+          <tr>
+            <td>{{ m.role }}</td>
+            <td>{{ m.engine }}</td>
+            <td><code>{{ m.model }}</code>{% if m.detail %}<div class="deploy-status-meta">{{ m.detail }}</div>{% endif %}</td>
+            <td>{{ m.status }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    <p class="deploy-status-meta">Checked {{ ds.checked_at }}</p>
+  </details>
 </section>
-<script>
-(function () {
-  var refreshBtn = document.getElementById("refreshDeployStatusBtn");
-  if (refreshBtn) {
-    refreshBtn.addEventListener("click", function () {
-      refreshBtn.disabled = true;
-      refreshBtn.textContent = "Refreshing…";
-      if (window.DeployStatusUI && window.DeployStatusUI.fetchDeployStatusOnce) {
-        window.DeployStatusUI.fetchDeployStatusOnce().finally(function () {
-          refreshBtn.disabled = false;
-          refreshBtn.textContent = "Refresh status";
-        });
-      } else {
-        window.location.reload();
-      }
-    });
-  }
-  var stopBtn = document.getElementById("stopDeployPodBtn");
-  if (stopBtn) {
-    stopBtn.addEventListener("click", function () {
-      var banner = document.getElementById("computeDeployStatus");
-      var isServerless = banner && banner.getAttribute("data-compute-mode") === "serverless";
-      var msg = isServerless
-        ? "Scale serverless workers to zero? Running GPU workers stop billing; the endpoint remains."
-        : "Stop and terminate this RunPod pod? Billing stops after termination.";
-      if (!window.confirm(msg)) return;
-      stopBtn.disabled = true;
-      stopBtn.textContent = "Stopping…";
-      fetch("/api/compute-deploy-stop", { method: "POST" })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          if (!data.ok) alert(data.error || "Stop failed");
-          window.location.reload();
-        })
-        .catch(function (e) {
-          alert(String(e));
-          window.location.reload();
-        });
-    });
-  }
-  var deleteBtn = document.getElementById("deleteNetworkVolumeBtn");
-  if (deleteBtn) {
-    deleteBtn.addEventListener("click", function () {
-      if (
-        !window.confirm(
-          "Delete the RunPod network volume? All cached model weights on this volume are permanently lost."
-        )
-      ) {
-        return;
-      }
-      var typed = window.prompt('Type DELETE to confirm volume deletion:', "");
-      if (typed !== "DELETE") {
-        alert("Volume deletion cancelled.");
-        return;
-      }
-      deleteBtn.disabled = true;
-      deleteBtn.textContent = "Deleting…";
-      fetch("/api/compute-network-volume-delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirm: "DELETE" }),
-      })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          if (!data.ok) alert(data.error || "Delete failed");
-          window.location.reload();
-        })
-        .catch(function (e) {
-          alert(String(e));
-          window.location.reload();
-        });
-    });
-  }
-})();
-</script>
 {% endif %}

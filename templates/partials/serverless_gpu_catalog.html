@@ -1,11 +1,11 @@
 {% for section in serverless_sections %}
-<section class="gpu-card" data-serverless-section="{{ section.key }}">
-  <h3>{{ section.title }}</h3>
+<div class="gpu-catalog-section" data-serverless-section="{{ section.key }}">
   <table class="gpu-table">
+    <caption class="gpu-meta" style="text-align:left;">{{ section.title }}</caption>
     <thead>
       <tr>
-        <th></th><th>Name</th><th>Pool</th><th>VRAM</th><th>Serverless $/hr</th>
-        <th>Availability</th><th>Cloud</th>
+        <th scope="col"><span class="visually-hidden">Select</span></th>
+        <th scope="col">GPU</th><th scope="col">VRAM</th><th scope="col">Price / hour</th><th scope="col">Availability</th>
       </tr>
     </thead>
     <tbody>
@@ -18,20 +18,18 @@
         <td>
           <input type="radio" name="selection_id" value="{{ g.selection_id }}"
             {% if checked %}checked{% endif %}
-            aria-label="Select {{ g.name }} in {{ g.data_center_name }}">
+            aria-label="Select {{ g.name }}">
         </td>
         <td>{{ g.name }}</td>
-        <td class="gpu-meta">{{ g.serverless_pool or '—' }}</td>
         <td>{% if g.vram_gb %}{{ g.vram_gb }} GB{% else %}—{% endif %}</td>
         <td>${{ "%.3f"|format(g.price_per_hour) }}</td>
-        <td>{{ g.availability }}</td>
-        <td class="gpu-meta">{{ g.cloud_badges or g.notes }}</td>
+        <td>{{ g.availability or 'Listed' }}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
-</section>
+</div>
 {% endfor %}
 {% if not serverless_sections %}
-<p class="gpu-meta">No serverless GPUs in this region right now. Try another data center or refresh.</p>
+<p class="gpu-meta">No serverless GPUs are listed in this region right now. Try another region or refresh.</p>
 {% endif %}

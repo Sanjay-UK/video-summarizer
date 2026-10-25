@@ -430,6 +430,17 @@ def submit_job(endpoint_id: str, job_input: dict[str, Any]) -> str:
     return str(job_id)
 
 
+def get_serverless_health(endpoint_id: str, *, timeout: float = 10.0) -> tuple[dict[str, Any] | None, str | None]:
+    """Read-only: GET /v2/{id}/health (job and worker counts). Never changes the endpoint."""
+    try:
+        status, payload = _inference_request("GET", endpoint_id, "/health", timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 — the caller reports 'unavailable'; the message stays short
+        return None, f"health check failed ({type(exc).__name__})"
+    if status != 200:
+        return None, f"health check returned HTTP {status}"
+    return payload, None
+
+
 def get_job_status(endpoint_id: str, job_id: str) -> dict[str, Any]:
     status, payload = _inference_request(
         "GET",

@@ -68,6 +68,50 @@
       color: #0c4a6e; font-size: 0.92rem;
     }
     .compute-policy-fields { display: flex; flex-direction: column; gap: 12px; margin: 0 0 20px; }
+    .gpu-meta { color: #666; font-size: 0.95rem; }
+    .gpu-intro { margin-bottom: 8px; }
+    .gpu-intro h1 { margin: 0 0 6px; }
+    .gpu-card h2.section-title { margin: 0 0 12px; font-size: 1.2rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }
+    .gpu-advanced { margin-top: 14px; }
+    .gpu-advanced > summary { cursor: pointer; color: #2563eb; font-weight: 600; padding: 6px 0; }
+    .gpu-advanced[open] > summary { margin-bottom: 10px; }
+    .deploy-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px 16px; margin: 12px 0; }
+    .deploy-facts dt { color: #64748b; font-size: 0.85rem; }
+    .deploy-facts dd { margin: 2px 0 0; font-weight: 600; color: #0f172a; overflow-wrap: anywhere; }
+    .deploy-summary-state { margin: 0 0 6px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+    .deploy-summary-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 8px; }
+    .deploy-summary-actions a { color: #2563eb; }
+    .rec-card { border: 1px solid #bbf7d0; background: #f0fdf4; border-radius: 10px; padding: 14px 16px; }
+    .rec-card .rec-top { margin-bottom: 4px; }
+    .gpu-catalog-section { margin-top: 8px; overflow-x: auto; }
+    .gpu-catalog-section .gpu-table { min-width: 460px; }
+    .gpu-cost-list { margin: 8px 0 12px 18px; padding: 0; line-height: 1.6; }
+    .gpu-deploy-bar { display: flex; flex-direction: column; gap: 8px; }
+    .gpu-deploy-bar .gpu-meta { margin: 0; }
+    .gpu-page .gpu-card + .gpu-card { margin-top: 0; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    @media (max-width: 640px) {
+      .gpu-page { padding: 16px 12px 40px; }
+      .serverless-region-field select { min-width: 0; width: 100%; }
+      .gpu-actions { gap: 8px; }
+    }
+    .live-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 12px; border-radius: 10px; border: 1px solid #e2e8f0; background: #f8fafc; color: #0f172a; }
+    .live-dot { width: 12px; height: 12px; border-radius: 50%; background: #64748b; display: inline-block; flex: none; }
+    .live-label { font-size: 1.02rem; }
+    .live-workers, .live-checked { color: #334155; font-size: 0.9rem; }
+    .live-status .deploy-refresh-btn { margin-left: auto; padding: 6px 12px; border-radius: 8px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; }
+    .live-status .deploy-refresh-btn:disabled { opacity: 0.6; cursor: wait; }
+    .live-tone-green { border-color: #86efac; background: #f0fdf4; }
+    .live-tone-green .live-dot { background: #15803d; }
+    .live-tone-gray .live-dot { background: #6b7280; }
+    .live-tone-blue { border-color: #93c5fd; background: #eff6ff; }
+    .live-tone-blue .live-dot { background: #2563eb; }
+    .live-tone-amber { border-color: #fcd34d; background: #fffbeb; }
+    .live-tone-amber .live-dot { background: #b45309; }
+    .live-tone-red { border-color: #fca5a5; background: #fef2f2; }
+    .live-tone-red .live-dot { background: #b91c1c; }
+    .live-tone-neutral .live-dot { background: #64748b; }
+    .live-explanation { margin: 8px 0 12px; color: #334155; }
   </style>
 </head>
 <body>
@@ -76,167 +120,64 @@
       <div class="container">
         <div class="navbar-brand">
           <a href="/" style="text-decoration:none;color:inherit;"><h2>VideoSummarize</h2></a>
-          <span class="tagline">GPU &amp; CPU selection</span>
+          <span class="tagline">Cloud compute</span>
         </div>
       </div>
     </nav>
-    <div id="deployStatusMount">
-    {% include 'partials/compute_deploy_status.html' %}
-    </div>
+    {% set is_serverless = report.compute_mode == 'serverless' %}
+    {% set rp = report.runpod_platform or {} %}
     <main class="gpu-page">
+      {% if is_serverless %}
+      <header class="gpu-intro">
+        <h1>Cloud compute</h1>
+        <p class="gpu-meta">
+          Choose a GPU for the summarizer. Saving deploys a RunPod Serverless endpoint that scales to zero when idle.
+        </p>
+      </header>
+      <div class="gpu-actions">
+        <a href="/">Back to summarizer</a>
+        <a href="/api/gpu-selection" target="_blank" rel="noopener">Developer JSON</a>
+      </div>
+      {% else %}
       <h1>Cloud compute selection</h1>
-      {% set is_serverless = report.compute_mode == 'serverless' %}
       <p class="gpu-meta">
-        {% if is_serverless %}
-        Choose serverless pipeline models and <strong>one RunPod GPU row</strong> for cost estimates and saved hardware metadata.
-        Deploy creates a RunPod Serverless endpoint (scale-to-zero) and runs a model warmup — not a Community/Secure pod.
-        {% else %}
         Choose <strong>one</strong> row from either list (GPU or CPU). Save records your choice in
         <code>data/compute_selection.json</code> and starts deploy (RunPod pod create, or AWS manual instructions).
-        {% endif %}
       </p>
       <div class="gpu-actions">
         <button type="button" onclick="location.reload()">Refresh catalog</button>
         <a href="/">Back to summarizer</a>
         <a href="/api/gpu-selection" target="_blank" rel="noopener">JSON API</a>
       </div>
+      {% endif %}
+
       {% for err in report.errors %}
       <p class="gpu-error">{{ err }}</p>
       {% endfor %}
-      {% if is_serverless and not report.serverless_image_configured %}
-      <section class="gpu-card" role="note">
-        <h3>Worker image</h3>
-        <p class="gpu-meta">
-          Pick <strong>Custom worker</strong> to auto build/push with Docker, or <strong>Existing registry image</strong>
-          to skip Docker (paste an image you deployed from RunPod Hub/GitHub or Docker Hub).
-          RunPod Hub Whisper/Ollama templates are not drop-in replacements for this app's combined worker.
-        </p>
-      </section>
-      {% endif %}
 
-      {% if is_serverless %}
-      <section class="gpu-card saved" id="serverlessSavedPanel">
-        <h3>Currently selected</h3>
-        <div id="serverlessSavedInner">
-          {% set saved_display = report.serverless_saved_display or {'kind': 'none'} %}
-          {% include "partials/serverless_saved_display.html" %}
-        </div>
-      </section>
-      {% elif report.saved_selection and report.saved_selection.offer %}
-      {% set s = report.saved_selection.offer %}
-      <section class="gpu-card saved">
-        <h3>Currently selected</h3>
-        <p>
-          <strong>{{ s.name }}</strong> ({{ s.kind|upper }}) — {{ s.cloud }}
-          — ${{ "%.3f"|format(s.price_per_hour) }}/hr
-          {% if s.vram_gb %} — {{ s.vram_gb }} GB VRAM{% endif %}
-          {% if s.vcpus %} — {{ s.vcpus }} vCPU{% endif %}
-        </p>
-        {% if report.deploy_status %}
-        <p class="gpu-meta">
-          Deploy: <strong>{{ report.deploy_status.status }}</strong>
-          — {{ report.deploy_status.message }}
-          {% if report.deploy_status.pod_id %} — Pod ID: {{ report.deploy_status.pod_id }}{% endif %}
-        </p>
-        {% endif %}
-        <p class="gpu-meta">Saved at {{ report.saved_selection.saved_at }}</p>
-      </section>
-      {% endif %}
-
-      {% if report.recommendations %}
-      <section class="gpu-card recommended">
-        <h3>Recommendations by category</h3>
-        <p class="gpu-meta" style="margin-bottom:12px;">
-          <strong>Approach:</strong> rule-based only (no LLM). Uses live catalog fields plus
-          <code>WHISPER_MODEL</code> / <code>SUMMARIZATION_MODEL</code> from config to explain each category.
-          Click <strong>Select</strong> to check a suggestion against the lists below.
-          {% if is_serverless %}
-          Picks are for the <strong>region shown in the dropdown</strong> (serverless catalog, not Community/Secure pods).
-          {% endif %}
-        </p>
-        <div id="serverlessRecommendationsInner">
-        {% if is_serverless %}
-          {% set recommendations = report.recommendations or {'categories': [], 'recommended_gpu_for_pipeline': none} %}
-          {% include "partials/serverless_recommendations.html" %}
+      <div id="deployStatusMount">
+        {% if not (deploy_status and deploy_status.show_deploy_banner) %}
+        <section class="gpu-card" id="noDeploymentNote">
+          <h2 class="section-title">Current deployment</h2>
+          <p class="gpu-meta">No endpoint has been deployed yet. Choose a GPU below and save to deploy.</p>
+        </section>
         {% else %}
-        {% set primary = report.recommendations.recommended_gpu_for_pipeline %}
-        {% if primary %}
-        <p class="rec-top">
-          Top pick for this app: <strong>{{ primary.name }}</strong>
-          ({{ primary.cloud }}, {{ primary.vram_gb }} GB, ${{ "%.3f"|format(primary.price_per_hour) }}/hr)
-          <button type="button" class="pick-rec-btn" data-selection-id="{{ primary.selection_id }}" data-offer="{{ primary | tojson | forceescape }}">Select top pick</button>
-        </p>
+        {% include 'partials/compute_deploy_status.html' %}
         {% endif %}
-        <table class="gpu-table">
-          <thead>
-            <tr><th>Category</th><th>Suggested hardware</th><th>$/hr</th><th>Check</th></tr>
-          </thead>
-          <tbody>
-          {% for cat in report.recommendations.categories %}
-            <tr>
-              <td>
-                <strong>{{ cat.title }}</strong>
-                <div class="gpu-meta" style="margin:4px 0 0;">{{ cat.description }}</div>
-              </td>
-              <td>
-                {% if cat.pick %}
-                  {{ cat.pick.name }} · {{ cat.pick.cloud }}
-                  {% if cat.pick.vram_gb %} · {{ cat.pick.vram_gb }} GB VRAM{% endif %}
-                  {% if cat.pick.vcpus %} · {{ cat.pick.vcpus }} vCPU{% endif %}
-                {% else %}
-                  <span class="gpu-meta">No match in current stock</span>
-                {% endif %}
-              </td>
-              <td>{% if cat.pick %}${{ "%.3f"|format(cat.pick.price_per_hour) }}{% else %}—{% endif %}</td>
-              <td>
-                {% if cat.pick %}
-                <button type="button" class="pick-rec-btn" data-selection-id="{{ cat.pick.selection_id }}" data-offer="{{ cat.pick | tojson | forceescape }}">Select</button>
-                {% endif %}
-              </td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-        {% endif %}
-        </div>
-      </section>
-      {% endif %}
-
-      {% set rp = report.runpod_platform %}
-      {% if rp %}
-      <section class="gpu-card">
-        <h3>RunPod cost &amp; lifecycle (platform-native)</h3>
-        <p class="gpu-meta">{{ rp.idle_auto_stop_note }}</p>
-        <p class="gpu-meta">
-          <a href="{{ rp.idle_monitor_url }}" target="_blank" rel="noopener">RunPod Idle Pod Monitor</a>
-          ·
-          <a href="{{ rp.serverless_idle_docs_url }}" target="_blank" rel="noopener">Serverless idleTimeout</a>
-        </p>
-        <p class="gpu-meta">{{ rp.spend_cap_note }}</p>
-        <p class="gpu-meta">
-          <a href="{{ rp.billing_docs_url }}" target="_blank" rel="noopener">RunPod billing &amp; spend limits</a>
-        </p>
-        <p class="gpu-meta">
-          This app does <strong>not</strong> enforce idle stop or spend caps locally — configure them in RunPod.
-          Serverless deploy uses <code>RUNPOD_COMPUTE_MODE=serverless</code> and <code>RUNPOD_SERVERLESS_IMAGE</code>
-          (see <code>docs/RUNPOD_SERVERLESS.md</code>).
-        </p>
-      </section>
-      {% endif %}
+      </div>
 
       <form id="computeSelectForm">
-        {% if report.serverless_model_catalog %}
-        <section class="gpu-card">
-          <h2 class="section-title">Serverless pipeline models</h2>
+        {% if is_serverless %}
+        {% set sm = report.serverless_models_saved %}
+        {% set cat = report.serverless_model_catalog %}
+        <section class="gpu-card" aria-labelledby="modelsHeading">
+          <h2 id="modelsHeading" class="section-title">1. Models</h2>
           <p class="gpu-meta">
-            Choose Whisper, Ollama, and NLLB for the GPU worker. Saving deploys the endpoint and runs a
-            <strong>cold-start warmup</strong> (loads all three) so the summarizer is ready afterward.
+            Whisper turns speech into text. The summarizer model writes the summary. Both run on the GPU worker.
           </p>
-          {% set sm = report.serverless_models_saved %}
-          {% set cat = report.serverless_model_catalog %}
           <div class="gpu-model-grid">
             <fieldset>
-              <legend><strong>Whisper</strong></legend>
+              <legend><strong>Transcription (Whisper)</strong></legend>
               {% for m in cat.whisper %}
               <label class="gpu-model-option">
                 <input type="radio" name="ss_whisper" value="{{ m.id }}"
@@ -246,7 +187,7 @@
               {% endfor %}
             </fieldset>
             <fieldset>
-              <legend><strong>Ollama (summarize)</strong></legend>
+              <legend><strong>Summarizer (Ollama)</strong></legend>
               {% for m in cat.ollama %}
               <label class="gpu-model-option">
                 <input type="radio" name="ss_ollama" value="{{ m.id }}"
@@ -255,51 +196,185 @@
               </label>
               {% endfor %}
             </fieldset>
-            <fieldset>
-              <legend><strong>NLLB</strong></legend>
+          </div>
+
+          <details class="gpu-advanced">
+            <summary>Advanced settings</summary>
+            <fieldset style="margin-bottom:16px;">
+              <legend><strong>Translation (NLLB)</strong></legend>
               {% for m in cat.nllb %}
               <label class="gpu-model-option">
                 <input type="radio" name="ss_nllb" value="{{ m.id }}"
-                  {% if m.id == sm.nllb %}checked{% endif %} required>
+                  {% if m.id == sm.nllb or loop.first %}checked{% endif %}>
                 {{ m.label }}
               </label>
               {% endfor %}
             </fieldset>
-          </div>
-          <fieldset style="margin-top:16px;">
-            <legend><strong>Worker Docker image</strong></legend>
-            {% for opt in cat.worker_image_sources %}
-            <label class="gpu-model-option">
-              <input type="radio" name="ss_worker_image_source" value="{{ opt.id }}"
-                {% if opt.id == (sm.worker_image_source or 'custom_build') %}checked{% endif %} required>
-              {{ opt.label }}
-            </label>
-            {% endfor %}
-            <div id="registryImageField" style="margin-top:10px;">
-              <label class="gpu-meta" for="ssRegistryImage">Container image (when using registry — no Docker)</label>
-              <input type="text" id="ssRegistryImage" name="ss_registry_image" style="width:100%;max-width:520px;padding:8px;"
-                placeholder="docker.io/youruser/video-summarizer-worker:v1.0.6"
-                value="{{ sm.registry_image or report.serverless_image_value or '' }}">
-            </div>
-            <div style="margin-top:10px;">
-              <label class="gpu-meta" for="ssDockerHubUser">Docker Hub username (custom build push target)</label>
-              <input type="text" id="ssDockerHubUser" name="docker_hub_user" style="width:100%;max-width:320px;padding:8px;"
-                placeholder="your-dockerhub-username"
-                autocomplete="username"
-                value="{{ report.docker_hub_user or '' }}">
-              <p class="gpu-meta">Saved to <code>.env</code> as <code>DOCKER_HUB_USER</code> on deploy. Image:
-                <code id="dockerHubPushPreview">{{ report.docker_hub_user or 'username' }}/video-summarizer-worker:v1.0.6</code></p>
-            </div>
-            <p class="gpu-meta" style="margin-top:10px;">{{ cat.combined_worker_note }}</p>
-            <details class="gpu-meta" style="margin-top:8px;">
-              <summary>RunPod Hub templates (Whisper / Ollama / vLLM — separate APIs)</summary>
-              <ul style="margin:8px 0 0 16px;">
-              {% for h in cat.runpod_hub_workers %}
-                <li><a href="{{ h.console_url }}" target="_blank" rel="noopener">{{ h.name }}</a> — {{ h.models }}. {{ h.notes }}</li>
+            <fieldset>
+              <legend><strong>Worker image</strong></legend>
+              {% for opt in cat.worker_image_sources %}
+              <label class="gpu-model-option">
+                <input type="radio" name="ss_worker_image_source" value="{{ opt.id }}"
+                  {% if opt.id == (sm.worker_image_source or 'custom_build') %}checked{% endif %}>
+                {{ opt.label }}
+              </label>
               {% endfor %}
-              </ul>
-            </details>
-          </fieldset>
+              <div id="registryImageField" style="margin-top:10px;">
+                <label class="gpu-meta" for="ssRegistryImage">Container image (when using a registry image, no Docker needed)</label>
+                <input type="text" id="ssRegistryImage" name="ss_registry_image" style="width:100%;max-width:520px;padding:8px;"
+                  placeholder="docker.io/youruser/video-summarizer-worker:v1.0.6"
+                  value="{{ sm.registry_image or report.serverless_image_value or '' }}">
+              </div>
+              <div style="margin-top:10px;">
+                <label class="gpu-meta" for="ssDockerHubUser">Docker Hub username (for a custom build)</label>
+                <input type="text" id="ssDockerHubUser" name="docker_hub_user" style="width:100%;max-width:320px;padding:8px;"
+                  placeholder="your-dockerhub-username"
+                  autocomplete="username"
+                  value="{{ report.docker_hub_user or '' }}">
+                <p class="gpu-meta">Saved to <code>.env</code> as <code>DOCKER_HUB_USER</code> on deploy. Image:
+                  <code id="dockerHubPushPreview">{{ report.docker_hub_user or 'username' }}/video-summarizer-worker:v1.0.6</code></p>
+              </div>
+              <p class="gpu-meta" style="margin-top:10px;">{{ cat.combined_worker_note }}</p>
+              <details class="gpu-meta" style="margin-top:8px;">
+                <summary>RunPod Hub templates (separate APIs, not drop-in)</summary>
+                <ul style="margin:8px 0 0 16px;">
+                {% for h in cat.runpod_hub_workers %}
+                  <li><a href="{{ h.console_url }}" target="_blank" rel="noopener">{{ h.name }}</a> — {{ h.models }}. {{ h.notes }}</li>
+                {% endfor %}
+                </ul>
+              </details>
+            </fieldset>
+            {% if not report.serverless_image_configured %}
+            <p class="gpu-meta" style="margin-top:10px;">
+              Custom build pushes with Docker. An existing registry image skips Docker.
+            </p>
+            {% endif %}
+          </details>
+        </section>
+
+        <section class="gpu-card" aria-labelledby="gpuHeading">
+          <h2 id="gpuHeading" class="section-title">2. GPU</h2>
+          {% if report.serverless_datacenters %}
+          <div class="serverless-region-field">
+            <label for="serverlessRegionSelect">Region</label>
+            <select id="serverlessRegionSelect" name="serverless_data_center_id" aria-describedby="serverlessRegionHint">
+              {% for dc in report.serverless_datacenters %}
+              <option value="{{ dc.data_center_id }}"
+                {% if dc.data_center_id == report.serverless_selected_data_center_id %}selected{% endif %}>
+                {{ dc.data_center_name }} ({{ dc.data_center_id }})
+              </option>
+              {% endfor %}
+            </select>
+            <p id="serverlessRegionHint" class="region-hint">Changing region loads that region's GPUs from RunPod.</p>
+            <span id="serverlessRegionStatus" class="gpu-meta" role="status"></span>
+          </div>
+          {% endif %}
+
+          <div id="serverlessSavedInner" aria-live="polite">
+            {% set saved_display = report.serverless_saved_display or {'kind': 'none'} %}
+            {% include "partials/serverless_saved_display.html" %}
+          </div>
+
+          <h3 style="margin:16px 0 8px; font-size:1.05rem;">Recommended for this pipeline</h3>
+          <div id="serverlessRecommendationsInner">
+            {% set recommendations = report.recommendations or {'categories': [], 'recommended_gpu_for_pipeline': none} %}
+            {% include "partials/serverless_recommendations.html" %}
+          </div>
+
+          <h3 style="margin:18px 0 4px; font-size:1.05rem;">Other GPUs in this region</h3>
+          <div id="serverlessGpuCatalog" aria-busy="false">
+            {% set serverless_sections = report.serverless_sections %}
+            {% set default_selection_id = report.serverless_default_selection_id %}
+            {% include "partials/serverless_gpu_catalog.html" %}
+          </div>
+
+          <details class="gpu-advanced">
+            <summary>Advanced details</summary>
+            <p class="gpu-meta">
+              Catalog fetched: <span id="serverlessCatalogFetchedAt">{{ report.fetched_at }}</span>.
+              Regional GPU rows: {{ report.serverless_gpu_rows | length if report.serverless_gpu_rows else 0 }}.
+              Extra pools from <code>RUNPOD_SERVERLESS_GPU_POOLS</code> are merged on deploy when set in <code>.env</code>.
+            </p>
+          </details>
+        </section>
+
+        <section class="gpu-card gpu-deploy-bar" aria-labelledby="deployHeading">
+          <h2 id="deployHeading" class="section-title">3. Deploy</h2>
+          <div class="gpu-actions" style="margin:0;">
+            <button type="submit" class="primary" id="saveDeployBtn">Save selection &amp; deploy</button>
+            <span id="deployMessage" class="gpu-meta" role="status"></span>
+          </div>
+          <p class="gpu-meta">
+            Deploying and running GPU work can incur RunPod charges. Workers scale to zero when idle, but actual
+            charges depend on usage and RunPod pricing.
+          </p>
+        </section>
+        {% else %}
+        {% if report.saved_selection and report.saved_selection.offer %}
+        {% set s = report.saved_selection.offer %}
+        <section class="gpu-card saved">
+          <h3>Currently selected</h3>
+          <p>
+            <strong>{{ s.name }}</strong> ({{ s.kind|upper }}) — {{ s.cloud }}
+            — ${{ "%.3f"|format(s.price_per_hour) }}/hr
+            {% if s.vram_gb %} — {{ s.vram_gb }} GB VRAM{% endif %}
+            {% if s.vcpus %} — {{ s.vcpus }} vCPU{% endif %}
+          </p>
+          {% if report.deploy_status %}
+          <p class="gpu-meta">
+            Deploy: <strong>{{ report.deploy_status.status }}</strong>
+            — {{ report.deploy_status.message }}
+            {% if report.deploy_status.pod_id %} — Pod ID: {{ report.deploy_status.pod_id }}{% endif %}
+          </p>
+          {% endif %}
+          <p class="gpu-meta">Saved at {{ report.saved_selection.saved_at }}</p>
+        </section>
+        {% endif %}
+
+        {% if report.recommendations %}
+        <section class="gpu-card recommended">
+          <h3>Recommendations by category</h3>
+          <p class="gpu-meta" style="margin-bottom:12px;">
+            <strong>Approach:</strong> rule-based only (no LLM). Click <strong>Select</strong> to check a suggestion against the lists below.
+          </p>
+          {% set primary = report.recommendations.recommended_gpu_for_pipeline %}
+          {% if primary %}
+          <p class="rec-top">
+            Top pick for this app: <strong>{{ primary.name }}</strong>
+            ({{ primary.cloud }}, {{ primary.vram_gb }} GB, ${{ "%.3f"|format(primary.price_per_hour) }}/hr)
+            <button type="button" class="pick-rec-btn" data-selection-id="{{ primary.selection_id }}" data-offer="{{ primary | tojson | forceescape }}">Select top pick</button>
+          </p>
+          {% endif %}
+          <table class="gpu-table">
+            <thead>
+              <tr><th>Category</th><th>Suggested hardware</th><th>$/hr</th><th>Check</th></tr>
+            </thead>
+            <tbody>
+            {% for cat in report.recommendations.categories %}
+              <tr>
+                <td>
+                  <strong>{{ cat.title }}</strong>
+                  <div class="gpu-meta" style="margin:4px 0 0;">{{ cat.description }}</div>
+                </td>
+                <td>
+                  {% if cat.pick %}
+                    {{ cat.pick.name }} · {{ cat.pick.cloud }}
+                    {% if cat.pick.vram_gb %} · {{ cat.pick.vram_gb }} GB VRAM{% endif %}
+                    {% if cat.pick.vcpus %} · {{ cat.pick.vcpus }} vCPU{% endif %}
+                  {% else %}
+                    <span class="gpu-meta">No match in current stock</span>
+                  {% endif %}
+                </td>
+                <td>{% if cat.pick %}${{ "%.3f"|format(cat.pick.price_per_hour) }}{% else %}—{% endif %}</td>
+                <td>
+                  {% if cat.pick %}
+                  <button type="button" class="pick-rec-btn" data-selection-id="{{ cat.pick.selection_id }}" data-offer="{{ cat.pick | tojson | forceescape }}">Select</button>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
         </section>
         {% endif %}
 
@@ -307,40 +382,9 @@
           <button type="submit" class="primary" id="saveDeployBtn">Save selection &amp; deploy</button>
           <span id="deployMessage" class="gpu-meta" role="status"></span>
         </div>
+        <p class="gpu-meta">Deploying and running GPU work can incur charges. Check the RunPod billing page for rates.</p>
 
         <h2 class="section-title">RunPod GPUs (pick one)</h2>
-        {% if is_serverless %}
-        {% if report.serverless_datacenters %}
-        <div class="serverless-region-field">
-          <label for="serverlessRegionSelect">Region / data center</label>
-          <select id="serverlessRegionSelect" name="serverless_data_center_id" aria-describedby="serverlessRegionHint">
-            {% for dc in report.serverless_datacenters %}
-            <option value="{{ dc.data_center_id }}"
-              {% if dc.data_center_id == report.serverless_selected_data_center_id %}selected{% endif %}>
-              {{ dc.data_center_name }} ({{ dc.data_center_id }})
-            </option>
-            {% endfor %}
-          </select>
-          <p id="serverlessRegionHint" class="region-hint">
-            Changing region queries RunPod live for that data center (not cached).
-            {% if report.serverless_deploy_env and report.serverless_deploy_env.data_center_id %}
-            Initial default from <code>RUNPOD_DATA_CENTER_ID</code> when nothing is saved yet.
-            {% endif %}
-          </p>
-          <span id="serverlessRegionStatus" class="gpu-meta" role="status"></span>
-        </div>
-        {% endif %}
-        <div class="gpu-serverless-notice" role="note">
-          GPU list, recommendations, and saved-offer pricing refresh from RunPod when you change region.
-          Extra pools from <code>RUNPOD_SERVERLESS_GPU_POOLS</code> are still merged on deploy when set in <code>.env</code>.
-        </div>
-        <div id="serverlessGpuCatalog">
-          {% set serverless_sections = report.serverless_sections %}
-          {% set default_selection_id = report.serverless_default_selection_id %}
-          {% include "partials/serverless_gpu_catalog.html" %}
-        </div>
-        <p class="gpu-meta">Region catalog fetched: <span id="serverlessCatalogFetchedAt">{{ report.fetched_at }}</span></p>
-        {% else %}
         {% set gpu_sections = [
           ('runpod-community', 'RunPod Community Cloud'),
           ('runpod-secure', 'RunPod Secure Cloud'),
@@ -376,9 +420,7 @@
         </section>
         {% endif %}
         {% endfor %}
-        {% endif %}
 
-        {% if not is_serverless %}
         <h2 class="section-title">Available CPUs</h2>
         {% set cpu_sections = [
           ('runpod-cpu-secure', 'RunPod CPU-only pods (Secure)'),
@@ -427,6 +469,20 @@
         {% endfor %}
         {% endif %}
       </form>
+
+      <section class="gpu-card" aria-labelledby="costHeading">
+        <h2 id="costHeading" class="section-title">Cost and scaling</h2>
+        <ul class="gpu-cost-list">
+          <li>Serverless workers can scale to zero when idle, as configured on the endpoint.</li>
+          <li>Compute charges depend on actual resource usage and RunPod pricing.</li>
+          <li>This app does not enforce an account-wide spend cap. Set limits in RunPod.</li>
+        </ul>
+        <p class="gpu-meta">
+          <a href="{{ rp.billing_docs_url or 'https://docs.runpod.io/accounts-billing/billing' }}" target="_blank" rel="noopener">RunPod billing and spend limits</a>
+          ·
+          <a href="{{ rp.serverless_idle_docs_url or 'https://docs.runpod.io/sdks/graphql/manage-endpoints' }}" target="_blank" rel="noopener">Serverless idle timeout</a>
+        </p>
+      </section>
 
       <p class="gpu-meta">Last updated: {{ report.fetched_at }}</p>
     </main>

@@ -1,48 +1,20 @@
 {% set recommendations = recommendations | default({'categories': [], 'recommended_gpu_for_pipeline': none}, true) %}
 {% set primary = recommendations.recommended_gpu_for_pipeline %}
 {% if primary %}
-<p class="rec-top">
-  Top pick for this app: <strong>{{ primary.name }}</strong>
-  ({{ primary.data_center_name or primary.data_center_id }}, pool {{ primary.serverless_pool or '—' }},
-  {{ primary.vram_gb }} GB, ${{ "%.3f"|format(primary.price_per_hour) }}/hr serverless)
+{% set full_pipeline = (recommendations.categories | selectattr('id', 'equalto', 'full_pipeline') | list) %}
+<div class="rec-card">
+  <p class="rec-top">
+    <strong>Recommended: {{ primary.name }}</strong>
+    <span class="gpu-meta">{% if primary.vram_gb %}{{ primary.vram_gb }} GB · {% endif %}${{ "%.3f"|format(primary.price_per_hour) }}/hr</span>
+  </p>
+  {% if full_pipeline %}
+  <p class="gpu-meta">{{ full_pipeline[0].description }}</p>
+  {% endif %}
   <button type="button" class="pick-rec-btn"
     data-selection-id="{{ primary.selection_id }}"
     data-offer="{{ primary | tojson | forceescape }}"
-    {% if primary.data_center_id %}data-serverless-dc="{{ primary.data_center_id }}"{% endif %}>Select top pick</button>
-</p>
+    {% if primary.data_center_id %}data-serverless-dc="{{ primary.data_center_id }}"{% endif %}>Select recommended GPU</button>
+</div>
+{% else %}
+<p class="gpu-meta">No GPU in this region has enough memory for the pipeline. Try another region.</p>
 {% endif %}
-<table class="gpu-table">
-  <thead>
-    <tr><th>Category</th><th>Suggested hardware</th><th>$/hr</th><th>Check</th></tr>
-  </thead>
-  <tbody>
-  {% for cat in recommendations.categories %}
-    <tr>
-      <td>
-        <strong>{{ cat.title }}</strong>
-        <div class="gpu-meta" style="margin:4px 0 0;">{{ cat.description }}</div>
-      </td>
-      <td>
-        {% if cat.pick %}
-          {{ cat.pick.name }}
-          · {{ cat.pick.data_center_name or cat.pick.data_center_id }}
-          · pool {{ cat.pick.serverless_pool or '—' }}
-          {% if cat.pick.cloud_badges %} · {{ cat.pick.cloud_badges }}{% endif %}
-          {% if cat.pick.vram_gb %} · {{ cat.pick.vram_gb }} GB VRAM{% endif %}
-        {% else %}
-          <span class="gpu-meta">No match in this region</span>
-        {% endif %}
-      </td>
-      <td>{% if cat.pick %}${{ "%.3f"|format(cat.pick.price_per_hour) }}{% else %}—{% endif %}</td>
-      <td>
-        {% if cat.pick %}
-        <button type="button" class="pick-rec-btn"
-          data-selection-id="{{ cat.pick.selection_id }}"
-          data-offer="{{ cat.pick | tojson | forceescape }}"
-          {% if cat.pick.data_center_id %}data-serverless-dc="{{ cat.pick.data_center_id }}"{% endif %}>Select</button>
-        {% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>

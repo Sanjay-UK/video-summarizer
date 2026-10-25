@@ -173,6 +173,20 @@ def _apply_last_job_metrics(out: dict[str, Any], deploy: dict[str, Any]) -> None
     out["last_runpod_job_id"] = metrics.get("runpod_job_id")
 
 
+def _fetch_endpoint_snapshot(endpoint_id: str) -> dict[str, Any]:
+    """Read-only provider reads for the status cache: settings first, then health only if settings succeeded."""
+    from src.runpod_serverless import get_serverless_endpoint, get_serverless_health
+
+    fetched_at = _utc_now()
+    config, config_err = get_serverless_endpoint(endpoint_id, timeout=10)
+    if config_err:
+        return {"config": None, "config_error": config_err, "health": None,
+                "health_error": None, "fetched_at": fetched_at}
+    health, health_err = get_serverless_health(endpoint_id, timeout=10)
+    return {"config": config, "config_error": None, "health": health,
+            "health_error": health_err, "fetched_at": fetched_at}
+
+
 def _serverless_deploy_status(
     out: dict[str, Any],
     deploy: dict[str, Any],
@@ -222,19 +236,29 @@ def _serverless_deploy_status(
         out["runpod_error"] = "RUNPOD_API_KEY not set; showing saved serverless deploy only."
         return _finalize_deploy_status(out)
 
-    from src.runpod_serverless import get_serverless_endpoint
+    from src.serverless_live_status import map_live_status
+    from src.serverless_status_cache import get_live_snapshot
 
-    live, err = get_serverless_endpoint(endpoint_id)
+    snapshot = get_live_snapshot(endpoint_id, fetch=_fetch_endpoint_snapshot)
+    live = snapshot.get("config")
+    err = snapshot.get("config_error")
     if err:
         out["runpod_error"] = err
-        return _finalize_deploy_status(out)
-    workers = (live or {}).get("workers") or {}
+    workers = {} if err else ((live or {}).get("workers") or {})
     out["workers_min"] = workers.get("min")
     out["workers_max"] = workers.get("max")
     out["workers_idle_timeout"] = workers.get("idleTimeout")
-    if workers.get("max") == 0:
+    out["live"] = map_live_status(
+        endpoint_configured=True,
+        config=live,
+        config_error=err,
+        health=snapshot.get("health"),
+        health_error=snapshot.get("health_error"),
+        checked_at=snapshot.get("fetched_at") or _utc_now(),
+    )
+    out["phase_label"] = out["live"]["label"]
+    if workers.get("max") == 0 and not err:
         out["phase"] = "stopped"
-        out["phase_label"] = "Workers scaled to 0"
     return _finalize_deploy_status(out)
 
 
