@@ -117,6 +117,60 @@ function highlightStreamUrl(jobId, langCode) {
  return `/stream/highlight/${jobId}/${langCode}`;
 }
 
+// A fresh one-hour S3 link from the backend, requested every time it is needed. Nothing is cached here.
+// Jobs that were not stored in S3 (local mode, older jobs) fall back to the local file routes.
+async function fetchHighlightUrl(jobId, langCode, attachment = false) {
+ const query = attachment ? '?attachment=1' : '';
+ const res = await fetch(`/api/highlight-url/${jobId}/${langCode}${query}`, { cache: 'no-store' });
+ const body = await res.json().catch(() => ({}));
+ if (res.ok) return body.url;
+ if (res.status === 404 && body.code === 'not_in_s3') {
+ return attachment ? `/download/highlight/${jobId}/${langCode}` : highlightStreamUrl(jobId, langCode);
+ }
+ throw new Error(body.error || `Highlight link failed (HTTP ${res.status})`);
+}
+
+function showHighlightPlayerError(message) {
+ const el = document.getElementById('highlightPlayerError');
+ if (!el) return;
+ el.textContent = message;
+ el.style.display = message ? 'block' : 'none';
+}
+
+// Point a media element at a fresh link. If playback fails, request one fresh link and retry once per attempt.
+// A second failure is shown to the user, so the page never loops.
+function bindHighlightSource(mediaEl, reloadEl, jobId, langCode) {
+ const token = {};
+ mediaEl._highlightToken = token;
+ let retried = false;
+ const apply = () => fetchHighlightUrl(jobId, langCode)
+ .then((url) => {
+ if (mediaEl._highlightToken !== token) return;
+ showHighlightPlayerError('');
+ mediaEl.src = url;
+ reloadEl.load();
+ })
+ .catch((err) => {
+ if (mediaEl._highlightToken === token) showHighlightPlayerError(err.message);
+ });
+ mediaEl.onerror = () => {
+ if (retried) {
+ showHighlightPlayerError('This highlight could not be played. Reopen the job to request a new link.');
+ return;
+ }
+ retried = true;
+ apply();
+ };
+ // One automatic refresh per playback attempt. Loading data must not reset it, or a link that loads and then
+ // fails again would be refreshed forever. A new attempt starts only when the user opens a job or switches language.
+ apply();
+}
+
+function unbindHighlightSource(mediaEl) {
+ mediaEl._highlightToken = null;
+ mediaEl.onerror = null;
+}
+
 function mergedOutputLanguages(results) {
  const byCode = new Map();
  (results.output_languages || []).forEach((l) => {
@@ -195,11 +249,12 @@ function applyResultsLanguageView() {
  const audioSource = document.getElementById('audioSource');
  if (audioSource && audioPlayer) {
  if (code === 'en') {
+ unbindHighlightSource(audioSource);
  audioSource.type = 'audio/mpeg';
  audioSource.src = `/download/audio/${currentJobId}`;
  } else {
  audioSource.type = 'video/mp4';
- audioSource.src = highlightStreamUrl(currentJobId, code);
+ bindHighlightSource(audioSource, audioPlayer, currentJobId, code);
  }
  audioPlayer.load();
  }
@@ -212,15 +267,16 @@ function applyResultsLanguageView() {
  if (playerWrap && player) {
  if (hasHighlight) {
  playerWrap.style.display = 'block';
- player.src = highlightStreamUrl(currentJobId, code);
- player.load();
+ bindHighlightSource(player, player, currentJobId, code);
  if (dlBtn) dlBtn.style.display = 'inline-block';
  } else if (results.highlight_video) {
  playerWrap.style.display = 'block';
+ unbindHighlightSource(player);
  player.removeAttribute('src');
  if (dlBtn) dlBtn.style.display = 'none';
  } else {
  playerWrap.style.display = 'none';
+ unbindHighlightSource(player);
  if (dlBtn) dlBtn.style.display = 'none';
  }
  }
@@ -719,9 +775,10 @@ function downloadHighlightForResultsLang() {
 }
 
 function downloadHighlightLang(langCode) {
- if (currentJobId && langCode) {
- window.location.href = `/download/highlight/${currentJobId}/${langCode}`;
- }
+ if (!currentJobId || !langCode) return;
+ fetchHighlightUrl(currentJobId, langCode, true)
+ .then((url) => { window.location.href = url; })
+ .catch((err) => showHighlightPlayerError(err.message));
 }
 
 function escapeHtml(text) {

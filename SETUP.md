@@ -145,7 +145,7 @@ YouTube occasionally blocks automated downloads for certain videos. The app will
 Harmless. This refers to an optional external tool path (`SUBTITLE_GEN_DIR` in `config.py`) used for domain-specific term correction that isn't part of this repo. The app works fully without it.
 
 **Port 5000 already in use**
-Another process is using it (on macOS this is sometimes AirPlay Receiver). Either stop that process, or edit the bottom of `app.py` to run on a different port, e.g. `app.run(debug=True, port=5001)`.
+Another process is using it (on macOS this is sometimes AirPlay Receiver). Either stop that process, or edit the bottom of `app.py` to run on a different port, e.g. `app.run(port=5001)`.
 
 **Slow transcription**
 `faster-whisper` runs on CPU by default (`config.py` → `WHISPER_DEVICE = "cpu"`). This is normal on machines without a supported GPU; longer videos will simply take more time.
@@ -160,6 +160,16 @@ Key settings live in `config.py` if you want to tune behavior:
 | `SUMMARIZATION_MODEL` | `"llama3.2:3b"` | Default Ollama model used for summarization |
 | `OLLAMA_HOST` | `"http://localhost:11434"` | Where the app looks for the Ollama service |
 | `VIDEO_QUALITY` | `"360p"` | Download quality for YouTube videos |
+
+## Network access and debugging
+
+The app listens on **http://localhost:5000 only** (127.0.0.1). It has no user accounts, so anyone who can reach
+the port can read its jobs, so it is not exposed to your network. The Flask debugger is off. To debug locally, set
+`VIDEO_SUMMARIZER_DEBUG=1` before starting, and never on a shared network. Using the app from another device on
+your network needs a deliberate change and its own access control. None is included here.
+
+**Retry in RunPod mode:** the highlight Retry button renders on this machine, so it is refused in RunPod mode with a
+message to switch to Local mode or re-run the job. Local mode retries as before.
 
 ## Optional: S3 source-video storage for RunPod highlights
 
@@ -200,6 +210,18 @@ storage off, so a single setting cannot break highlights on the current worker.
 presigned URL. The object is deleted only after the RunPod job completes. If the job fails, the object is
 kept and its key is recorded in the job folder (`s3_video.json`) for retry or manual cleanup. Presigned URLs
 are never written to disk.
+
+**Highlights in S3 (when both flags are on):** each finished highlight is uploaded to the private bucket under
+`highlights/<uuid>/<lang>.mp4`, and its key, size, and status are saved in the job folder
+(`s3_highlights.json`). No URL is saved anywhere. Every play or download asks the app for a fresh link that lasts
+one hour (`/api/highlight-url/<job>/<lang>`). The page asks again once if playback fails. If S3 cannot give a
+link, the page shows the error. It never plays the local copy in place of S3.
+
+- **Retention:** highlight objects are kept indefinitely, so History keeps working. Nothing deletes them. A
+  retention or cleanup rule would need its own decision and a test.
+- **Credentials:** the profile's access key is long-term, so links stay valid until the key is rotated. If the
+  profile ever uses temporary credentials that end within an hour, the app refuses to sign a link and says why.
+- **Restarting the app without the two flags** stops new uploads. Existing S3 highlights still open in History.
 
 ## Endpoint worker capacity (lease lifecycle)
 

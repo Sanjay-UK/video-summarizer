@@ -51,6 +51,29 @@ def _mark_s3_retained(job_output_dir: Path, key: str, log: Callable[[str], None]
     log(f"S3 source kept for retry (key recorded in {s3.S3_RECORD_NAME}).")
 
 
+def _store_highlights_in_s3(
+    job_output_dir: Path, paths: dict[str, Path], store: Any, log: Callable[[str], None]
+) -> dict[str, Path]:
+    """Upload each finished highlight and record its key. A language whose upload fails is reported as failed.
+
+    Highlights are never deleted here. Their keys stay in s3_highlights.json so the job remains usable in History.
+    """
+    from src import s3_video_store as s3
+    from src.highlight_pipeline import _write_lang_failure
+
+    kept: dict[str, Path] = {}
+    for lang, mp4 in paths.items():
+        record = s3.upload_highlight(job_output_dir, lang, mp4, store)
+        if record.get("status") == "uploaded":
+            log(f"Highlight {lang} stored in S3 (key recorded in {s3.HIGHLIGHT_RECORD_NAME}).")
+            kept[lang] = mp4
+        else:
+            message = f"Highlight upload to S3 failed ({record.get('error_code', 'error')}); not served from local disk."
+            log(message)
+            _write_lang_failure(job_output_dir, lang, message, failure_kind="s3_upload")
+    return kept
+
+
 class PipelineExecutor(ABC):
     mode: str
 
@@ -278,6 +301,8 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
             message = "RunPod worker returned no highlight file for this language."
             log(message)
             _write_lang_failure(job_output_dir, lang, message, failure_kind="runpod_worker")
+        if s3_store is not None and paths:
+            paths = _store_highlights_in_s3(job_output_dir, paths, s3_store, log)
         return paths
 
 

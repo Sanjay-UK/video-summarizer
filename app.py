@@ -2,11 +2,12 @@
 """Flask web app for video summarization."""
 
 import json
+import re
 import sys
 import threading
 from pathlib import Path
 from typing import Union
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, redirect, send_file
 from datetime import datetime
 import uuid
 import os
@@ -30,6 +31,7 @@ from src.highlight_jobs import (
     write_highlight_status,
 )
 from src.highlight_pipeline import retry_highlight_languages
+from src import s3_video_store as s3
 from src.locales import LOCALES, parse_language_list
 from src.summary_jobs import clean_summary_text_for_display, summary_translations_for_api
 from src.summary_translate import summary_text_for_language, translate_summary_for_languages
@@ -83,6 +85,7 @@ def enrich_history_entry(entry: dict) -> dict:
     highlights = list_highlight_downloads(job_dir)
     entry["highlights"] = highlights
     entry["has_highlight_video"] = len(highlights) > 0
+    entry["s3_stored_highlights"] = s3.stored_highlight_langs(job_dir)
 
     i18n = summary_translations_for_api(job_dir)
     tr_keys = list((i18n.get("summary_translations") or {}).keys())
@@ -865,6 +868,18 @@ def _job_output_dir(job_id: str) -> Path:
 def retry_highlight(job_id):
     """Re-run failed highlight languages (reuses cache + shared visuals)."""
     try:
+        if not _valid_job_id(job_id):
+            return jsonify({"error": "Job not found"}), 404
+        from src.pipeline_runtime import RUNTIME_RUNPOD, load_pipeline_runtime
+
+        if load_pipeline_runtime() == RUNTIME_RUNPOD:
+            # The retry path renders on this machine and never uploads to S3. Refuse rather than do local
+            # processing in RunPod mode. A serverless retry needs its own implementation and tests.
+            return jsonify({
+                "error": "Retrying a highlight is not available in RunPod mode yet, so nothing was rendered "
+                         "locally. Switch to Local mode to retry on this machine, or re-run the job on RunPod.",
+                "code": "retry_unavailable_runpod",
+            }), 409
         job_dir = _job_output_dir(job_id)
         if not job_dir.is_dir():
             return jsonify({"error": "Job not found"}), 404
@@ -898,15 +913,82 @@ def retry_highlight(job_id):
         return jsonify({"error": str(e)}), 500
 
 
+NO_STORE = {"Cache-Control": "no-store"}
+JOB_ID_RE = re.compile(r"^[0-9a-f]{8}$")  # job IDs are the first 8 hex characters of a UUID
+
+
+def _valid_job_id(job_id: str) -> bool:
+    return bool(JOB_ID_RE.match(job_id or ""))
+
+
+def _upload_failed_response(job_id: str, code: str):
+    """Refuse to serve a local copy whose S3 upload failed. The user sees why, not a stale file."""
+    print(f"[S3] highlight {job_id}/{code} not served: S3 upload failed")
+    message = "This highlight could not be saved to S3, so it is not available. Re-run the job to try again."
+    return message, 503, NO_STORE
+
+
+def _highlight_link(job_id: str, code: str, attachment: bool) -> dict:
+    return s3.highlight_url(_job_output_dir(job_id), code, s3.highlight_store(), attachment=attachment)
+
+
+@app.route("/api/highlight-url/<job_id>/<lang_code>", methods=["GET"])
+def api_highlight_url(job_id, lang_code):
+    """Fresh one-hour S3 link for a stored highlight. Built on every call, never saved or cached.
+
+    404 with code 'not_in_s3' means the highlight exists only on local disk (local mode or a job from before S3).
+    """
+    code = (lang_code or "en").strip().lower()
+    if not _valid_job_id(job_id):
+        return jsonify({"error": "Job not found"}), 404, NO_STORE
+    if code not in LOCALES:
+        return jsonify({"error": "Invalid language"}), 400, NO_STORE
+    if not _job_output_dir(job_id).is_dir():
+        return jsonify({"error": "Job not found"}), 404, NO_STORE
+    attachment = request.args.get("attachment", "") in ("1", "true")
+    try:
+        payload = _highlight_link(job_id, code, attachment)
+    except s3.HighlightStoreError as exc:
+        print(f"[S3] highlight link for {job_id}/{code} not issued: {exc.code}")
+        return jsonify({"error": str(exc), "code": exc.code}), s3.ERROR_STATUS.get(exc.code, 500), NO_STORE
+    except Exception as exc:  # noqa: BLE001 — log the type only; messages can carry sensitive detail
+        print(f"[S3] highlight link for {job_id}/{code} failed: {type(exc).__name__}")
+        return jsonify({"error": "S3 is unavailable for this highlight.", "code": "s3_unavailable"}), 503, NO_STORE
+    print(f"[S3] highlight link for {job_id}/{code} issued")
+    return jsonify(payload), 200, NO_STORE
+
+
+def _redirect_to_stored_highlight(job_id: str, code: str, attachment: bool):
+    """Send the browser to a fresh S3 link. Nothing falls back to the local file when S3 is the source."""
+    try:
+        payload = _highlight_link(job_id, code, attachment)
+    except s3.HighlightStoreError as exc:
+        print(f"[S3] highlight redirect for {job_id}/{code} not issued: {exc.code}")
+        return str(exc), s3.ERROR_STATUS.get(exc.code, 500), NO_STORE
+    except Exception as exc:  # noqa: BLE001
+        print(f"[S3] highlight redirect for {job_id}/{code} failed: {type(exc).__name__}")
+        return "S3 is unavailable for this highlight.", 503, NO_STORE
+    response = redirect(payload["url"], code=302)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/stream/highlight/<job_id>")
 @app.route("/stream/highlight/<job_id>/<lang_code>")
 def stream_highlight(job_id, lang_code: str = "en"):
     """Inline MP4 for browser <video> (supports Range seeking)."""
     try:
+        if not _valid_job_id(job_id):
+            return "File not found", 404
         code = (lang_code or "en").strip().lower()
         if code not in LOCALES:
             return "Invalid language", 400
-        file_path = highlight_file_for_lang(_job_output_dir(job_id), code)
+        job_dir = _job_output_dir(job_id)
+        if s3.upload_failed_for_lang(job_dir, code):
+            return _upload_failed_response(job_id, code)
+        if s3.has_stored_highlight(job_dir, code):
+            return _redirect_to_stored_highlight(job_id, code, attachment=False)
+        file_path = highlight_file_for_lang(job_dir, code)
         if file_path.is_file():
             return send_file(
                 file_path,
@@ -928,10 +1010,17 @@ def stream_highlight(job_id, lang_code: str = "en"):
 def download_highlight(job_id, lang_code: str = "en"):
     """Download highlight_<lang>.mp4 for a completed job."""
     try:
+        if not _valid_job_id(job_id):
+            return "File not found", 404
         code = (lang_code or "en").strip().lower()
         if code not in LOCALES:
             return "Invalid language", 400
-        file_path = highlight_file_for_lang(_job_output_dir(job_id), code)
+        job_dir = _job_output_dir(job_id)
+        if s3.upload_failed_for_lang(job_dir, code):
+            return _upload_failed_response(job_id, code)
+        if s3.has_stored_highlight(job_dir, code):
+            return _redirect_to_stored_highlight(job_id, code, attachment=True)
+        file_path = highlight_file_for_lang(job_dir, code)
         if file_path.is_file():
             return send_file(
                 file_path,
@@ -991,6 +1080,8 @@ if __name__ == "__main__":
 
     startup_check(print)  # prunes expired job leases; sets endpoint max workers to 0 when none remain
     start_background_recovery(print)  # repeats that check every 5 min while the app runs
-    _flask_debug = True
+    # Localhost only, debugger off. The Werkzeug debugger must never be reachable from the network. Set
+    # VIDEO_SUMMARIZER_DEBUG=1 for local debugging only.
+    _flask_debug = os.environ.get("VIDEO_SUMMARIZER_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
     print("Open: http://localhost:5000")
-    app.run(debug=_flask_debug, host="0.0.0.0", port=5000)
+    app.run(debug=_flask_debug, host="127.0.0.1", port=5000)
