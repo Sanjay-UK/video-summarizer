@@ -334,7 +334,10 @@ def submit_and_wait(
     with job_lease(endpoint_id, label, _log):
         job_id = submit_job_when_ready(endpoint_id, job_input, log=_log)
         _log(f"RunPod {label} job submitted: {job_id}")
-        return poll_job_until_done(endpoint_id, job_id, log=_log, max_wait_sec=max_wait_sec)
+        result = poll_job_until_done(endpoint_id, job_id, log=_log, max_wait_sec=max_wait_sec)
+        # Always carry the ID that RunPod accepted, so callers never need a separate variable for it.
+        result.setdefault("id", job_id)
+        return result
 
 
 def build_warmup_input(*, whisper_model: str, ollama_model: str, nllb_model: str) -> dict[str, Any]:
@@ -595,7 +598,7 @@ def run_heavy_phase_via_serverless(
     metrics = {
         "delayTime": result.get("delayTime"),
         "executionTime": result.get("executionTime"),
-        "runpod_job_id": runpod_job_id,
+        "runpod_job_id": result.get("id"),
     }
     metrics_path = job_output_dir / "runpod_job_metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
