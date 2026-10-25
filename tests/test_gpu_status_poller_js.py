@@ -160,7 +160,7 @@ class StatusPollerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         proc = subprocess.run(
-            ["node", "-e", HARNESS, str(DEPLOY_JS)], capture_output=True, text=True, timeout=60
+            ["node", "-e", HARNESS, str(DEPLOY_JS)], capture_output=True, text=True, encoding="utf-8", timeout=60
         )
         if proc.returncode != 0:
             raise AssertionError(proc.stderr)

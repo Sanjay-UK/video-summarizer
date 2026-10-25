@@ -92,7 +92,7 @@ class BannerRendererTests(unittest.TestCase):
         statuses_path.write_text(json.dumps(STATUSES), encoding="utf-8")
         proc = subprocess.run(
             ["node", "-e", HARNESS, str(DEPLOY_JS), str(statuses_path)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
         )
         if proc.returncode != 0:
             raise AssertionError(proc.stderr)

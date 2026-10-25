@@ -54,7 +54,7 @@ class HighlightRetryLimitTests(unittest.TestCase):
     def setUp(self):
         proc = subprocess.run(
             ["node", "-e", HARNESS, str(APP_JS)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.result = json.loads(proc.stdout.strip().splitlines()[-1])
