@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Flask web app for video summarization."""
 
+from src.log_safety import redact, safe_exc, safe_traceback
 import json
 import re
 import sys
@@ -31,9 +32,15 @@ from src.highlight_jobs import (
     read_highlight_status,
     write_highlight_status,
 )
-from src.highlight_pipeline import retry_highlight_languages
+from src.highlight_pipeline import _write_lang_failure, retry_highlight_languages
 from src import s3_video_store as s3
 from src.locales import LOCALES, parse_language_list
+from src.youtube_errors import (
+    USER_ACTIONABLE as USER_ACTIONABLE_CODES,
+    YouTubeDownloadError,
+    is_anti_bot_detail,
+    sanitize_technical,
+)
 from src.summary_jobs import clean_summary_text_for_display, summary_translations_for_api
 from src.summary_translate import summary_text_for_language, translate_summary_for_languages
 from src.gpu_selection import build_gpu_selection_report
@@ -163,6 +170,11 @@ class JobProgress:
         self.log_lines = []
         self.results = None
         self.error = None
+        self.error_code = None
+        self.indeterminate = False
+        self.stage_started_at = datetime.now()
+        self.progress_source = "local"
+        self._lock = threading.RLock()
         self.created_at = datetime.now()
         self.completed_at = None
         self.job_output_dir = OUTPUT_DIR / job_id
@@ -174,20 +186,99 @@ class JobProgress:
         self.log_lines.append(f"[{timestamp}] {message}")
         print(f"[{self.job_id}] {message}")
 
-    def set_step(self, step_name, progress):
-        """Update current step and progress."""
-        self.current_step = step_name
-        self.progress = progress
-        self.add_log(f"Step: {step_name} ({progress*100:.0f}%)")
+    def set_step(self, step_name, progress, indeterminate=False):
+        """Start a stage. indeterminate=True means no progress inside this stage can be measured."""
+        with self._lock:
+            self.current_step = step_name
+            self.progress = min(float(progress), 0.99)  # 100% is only set by mark_completed()
+            self.indeterminate = indeterminate
+            self.stage_started_at = datetime.now()
+        if indeterminate:
+            self.add_log(f"Step: {step_name} (running, no measurable progress)")
+        else:
+            self.add_log(f"Step: {step_name} ({progress*100:.0f}%)")
+
+    def mark_completed(self):
+        """The only place that sets 100%: status and progress change together, after outputs are saved."""
+        with self._lock:
+            self.indeterminate = False
+            self.progress = 1.0
+            self.status = "completed"
+            self.completed_at = datetime.now()
+
+    def mark_failed(self, message, code=None):
+        """Record a failure. Progress stays at its last confirmed value.
+
+        The stored message is sanitized (URLs, tokens, and cookie values removed), so the progress API, the results
+        API, and the metadata file all show the same safe text.
+        """
+        with self._lock:
+            self.indeterminate = False
+            self.status = "error"
+            self.error = sanitize_technical(str(message), limit=400) or "The job failed."
+            self.error_code = code
+            self.completed_at = datetime.now()
+
+    def set_progress(self, fraction):
+        """Measured progress inside the current stage. Never moves backward, and never reaches 1.0.
+
+        Reaching 100% is reserved for a confirmed successful completion (job.progress = 1.0 after the outputs
+        are saved), so a measured value here is capped just below it.
+        """
+        try:
+            value = min(max(float(fraction), 0.0), 0.99)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            self.indeterminate = False
+            if value > self.progress:
+                self.progress = value
 
     def to_dict(self):
-        """Convert to API response format."""
-        return {
-            "current_step": self.current_step,
-            "progress": self.progress,
-            "status": self.status,
-            "log_lines": self.log_lines[-20:],
-        }
+        """Convert to API response format. Read under the lock, so status and progress are consistent."""
+        with self._lock:
+            return {
+                "job_id": self.job_id,
+                "current_step": self.current_step,
+                "progress": self.progress,
+                "status": self.status,
+                "log_lines": self.log_lines[-20:],
+                "error": self.error if self.status == "error" else None,
+                "error_code": self.error_code,
+                "indeterminate": self.indeterminate,
+                "stage_elapsed_sec": int((datetime.now() - self.stage_started_at).total_seconds()),
+                "progress_source": self.progress_source,
+            }
+
+def _job_reporter(job, transcribe_range):
+    """Connects the pipeline's measured-progress calls to this job. Transcription progress maps into its range."""
+    low, high = transcribe_range
+
+    def reporter(kind, value, step, indeterminate):
+        if kind == "stage":
+            job.set_step(step, value, indeterminate=indeterminate)
+        else:
+            job.set_progress(low + (high - low) * value)
+
+    return reporter
+
+
+def _download_progress_hook(job):
+    """yt-dlp progress hook: downloaded bytes over total bytes, mapped into the download range (5%-10%)."""
+
+    def hook(status):
+        try:
+            if status.get("status") != "downloading":
+                return
+            done = status.get("downloaded_bytes")
+            total = status.get("total_bytes") or status.get("total_bytes_estimate")
+            if done and total:
+                job.set_progress(0.05 + 0.05 * min(done / total, 1.0))
+        except Exception:  # noqa: BLE001 — progress must never fail the download
+            return
+
+    return hook
+
 
 def process_video(
     job_id,
@@ -206,10 +297,13 @@ def process_video(
         highlight_languages: comma-separated language codes (en, hi, kn, te, ta)
     """
     job = jobs[job_id]
+    from src.job_progress import reset_reporter, set_reporter
+
     runtime_ctx = resolve_runtime_for_job(pipeline_runtime)
     env_prior = apply_runtime_side_effects(runtime_ctx)
     executor = build_executor(runtime_ctx)
     transcription: dict = {}
+    reporter_token = set_reporter(_job_reporter(job, transcribe_range=(0.35, 0.60)))
 
     try:
         if runtime_ctx.get("error"):
@@ -226,7 +320,18 @@ def process_video(
         if "youtube.com" in source or "youtu.be" in source:
             job.add_log("Downloading YouTube video...")
             try:
-                video_path = download_youtube_video(source, DOWNLOADS_DIR, quality=360, max_retries=3)
+                video_path = download_youtube_video(
+                    source, DOWNLOADS_DIR, quality=360, max_retries=3,
+                    progress_hook=_download_progress_hook(job),
+                )
+            except YouTubeDownloadError as e:
+                # Classified failure. The user message is shown; technical detail goes to the server log only.
+                job.add_log(f"YouTube download stopped ({e.code}).")
+                print(f"[{job_id}] YouTube detail ({e.code}): {e.detail}")
+                if is_anti_bot_detail(e.detail):
+                    job.add_log("YouTube has anti-bot protection on this video.")
+                    job.add_log("Please download the video manually and upload it instead.")
+                raise
             except Exception as e:
                 error_str = str(e).lower()
                 if "page needs to be reloaded" in error_str or "sabr" in error_str:
@@ -302,7 +407,11 @@ def process_video(
                 job.add_log(
                     "RunPod serverless: submitting GPU job (workers scale from zero on RunPod)."
                 )
-        job.set_step("transcribing", 0.35)
+        remote_heavy = runtime_ctx.get("mode") == "hybrid_runpod"
+        job.progress_source = "runpod" if remote_heavy else "local"
+        job.set_step("transcribing", 0.35, indeterminate=remote_heavy)
+        if remote_heavy:
+            job.add_log("RunPod GPU is transcribing and summarizing. The worker does not report progress yet.")
         executor.run_heavy_phase(
             job_id=job_id,
             audio_path=audio_path,
@@ -329,8 +438,11 @@ def process_video(
         job.add_log(f"Heavy phase complete ({segments_count} segments, summary + translations)")
 
         output_lang_codes = parse_language_list(highlight_languages)
+        # Only languages the user asked to render are "requested". Without a highlight request the list is empty,
+        # so no highlight row (and no false "Failed") is shown.
+        wants_highlight_now = highlight_video or any(c != "en" for c in output_lang_codes)
         hl_status = read_highlight_status(job.job_output_dir)
-        hl_status["requested_languages"] = output_lang_codes
+        hl_status["requested_languages"] = output_lang_codes if wants_highlight_now else []
         write_highlight_status(job.job_output_dir, hl_status)
 
         summary_text = open(job.job_output_dir / "summary.txt", encoding="utf-8").read()
@@ -366,21 +478,20 @@ def process_video(
 
             job.set_step("generating_subtitles", 0.98)
         except Exception as e:
-            job.add_log(f"Audio/subtitle generation failed: {str(e)}")
+            job.add_log(f"Audio/subtitle generation failed: {sanitize_technical(redact(str(e)))}")
             job.set_step("generating_subtitles", 0.98)
 
         wants_highlight = highlight_video or any(c != "en" for c in output_lang_codes)
         if wants_highlight:
             lang_codes = output_lang_codes
-            job.set_step("highlight_topics", 0.92)
-            job.add_log("Selecting topics for highlight video...")
             job.add_log(f"Highlight languages: {', '.join(lang_codes)} (translator: Google)")
             try:
                 with open(job.job_output_dir / "segments.json", encoding="utf-8") as f:
                     segments = json.load(f)
-                job.set_step("highlight_visuals", 0.94)
-                job.add_log("Extracting scene visuals and narration...")
-                job.set_step("highlight_assembly", 0.97)
+                # One blocking call (topics, visuals, narration, subtitles, FFmpeg). Its progress is not measured,
+                # so the stage is indeterminate until the call returns.
+                job.set_step("highlight_assembly", 0.92, indeterminate=True)
+                job.add_log("Rendering highlight video (topics, visuals, narration, subtitles)...")
                 highlight_out = executor.run_highlight_phase(
                     job_id=job_id,
                     video_path=staged_video,
@@ -398,19 +509,25 @@ def process_video(
                 else:
                     highlight_paths = {"en": highlight_out}
                     job.add_log(f"Highlight en ready: {highlight_out.name}")
+                # A requested language that was attempted but produced neither a file nor a status record is a failure.
+                recorded = read_highlight_status(job.job_output_dir).get("languages") or {}
+                for code in lang_codes:
+                    if not highlight_file_for_lang(job.job_output_dir, code).is_file() and code not in recorded:
+                        _write_lang_failure(
+                            job.job_output_dir, code, "No highlight file was produced for this language.",
+                            failure_kind="missing_output",
+                        )
                 for row in list_highlight_language_status(job.job_output_dir):
                     if row["status"] == "failed":
                         job.add_log(f"Highlight {row['code']} failed: {row.get('message', '')}")
             except Exception as e:
-                job.add_log(f"Highlight video failed: {e}")
-            job.set_step("highlight_complete", 1.0)
+                job.add_log(f"Highlight video failed: {sanitize_technical(redact(str(e)))}")
+            job.set_step("highlight_complete", 0.98)
         else:
-            job.set_step("generating_subtitles", 1.0)
+            job.set_step("generating_subtitles", 0.98)
 
         job.add_log("Pipeline completed successfully!")
-        job.status = "completed"
-        job.progress = 1.0
-        job.completed_at = datetime.now()
+        job.mark_completed()
 
         summary_path = job.job_output_dir / "summary.txt"
         summary_text = open(summary_path, encoding="utf-8").read() if summary_path.exists() else ""
@@ -456,13 +573,11 @@ def process_video(
         return True
 
     except Exception as e:
-        error_msg = f"Error: {str(e)}"
+        error_msg = f"Error: {sanitize_technical(str(e))}"
         job.add_log(error_msg)
-        job.status = "error"
-        job.error = str(e)
-        job.completed_at = datetime.now()
+        job.mark_failed(str(e), e.code if isinstance(e, YouTubeDownloadError) else None)
         import traceback
-        traceback.print_exc()
+        print(safe_traceback())
 
         try:
             for item in job_history:
@@ -481,7 +596,8 @@ def process_video(
                 "created_at": job.created_at.isoformat(),
                 "completed_at": job.completed_at.isoformat(),
                 "status": "error",
-                "error": str(e),
+                "error": job.error,
+                "error_code": job.error_code,
             }
             job.job_output_dir.mkdir(parents=True, exist_ok=True)
             with open(job.job_output_dir / "summary_metadata.json", "w") as f:
@@ -491,6 +607,7 @@ def process_video(
 
         return False
     finally:
+        reset_reporter(reporter_token)
         try:
             restore_runtime_side_effects(env_prior)
         except Exception as restore_exc:
@@ -730,7 +847,7 @@ def summarize():
         return jsonify({"job_id": job_id}), 200
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": redact(str(e))}), 500
 
 @app.route("/api/progress/<job_id>", methods=["GET"])
 def progress(job_id):
@@ -741,6 +858,20 @@ def progress(job_id):
     job = jobs[job_id]
     return jsonify(job.to_dict()), 200
 
+def _failed_job_payload(job_dir: Path):
+    """Error payload for a job whose metadata says it failed, else None."""
+    metadata_path = job_dir / "summary_metadata.json"
+    if not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if metadata.get("status") != "error":
+        return None
+    return {"error": metadata.get("error") or "Job failed", "code": metadata.get("error_code")}
+
+
 @app.route("/api/results/<job_id>", methods=["GET"])
 def results(job_id):
     """Get final results."""
@@ -750,13 +881,19 @@ def results(job_id):
         if job.status == "completed":
             return jsonify(job.results), 200
         elif job.status == "error":
-            return jsonify({"error": job.error}), 500
+            status = 422 if job.error_code in USER_ACTIONABLE_CODES else 500
+            return jsonify({"error": job.error, "code": job.error_code}), status
         else:
             return jsonify({"status": "processing"}), 202
 
     job_dir = OUTPUT_DIR / job_id
     summary_path = job_dir / "summary.txt"
     transcript_path = job_dir / "transcript.txt"
+
+    # A failed job is recorded in its metadata. Partial files must never make it look successful.
+    failed = _failed_job_payload(job_dir)
+    if failed is not None:
+        return jsonify(failed), (422 if failed.get("code") in USER_ACTIONABLE_CODES else 500)
 
     if summary_path.exists():
         try:
@@ -780,7 +917,7 @@ def results(job_id):
                 "output_languages": list_output_languages(job_dir),
             }), 200
         except Exception as e:
-            print(f"[ERROR] Failed to load old job {job_id}: {e}")
+            print(f"[ERROR] Failed to load old job {job_id}: {safe_exc(e)}")
             return jsonify({"error": "Failed to load job data"}), 500
 
     return jsonify({"error": "Job not found"}), 404
@@ -823,7 +960,7 @@ def download_summary(job_id, lang_code: str = "en"):
             )
         return "File not found", 404
     except Exception as e:
-        print(f"[ERROR] Download summary failed: {e}")
+        print(f"[ERROR] Download summary failed: {safe_exc(e)}")
         return "File not found", 404
 
 @app.route("/download/subtitles/<job_id>")
@@ -845,7 +982,7 @@ def download_subtitles(job_id):
             )
         return "File not found", 404
     except Exception as e:
-        print(f"[ERROR] Download subtitles failed: {e}")
+        print(f"[ERROR] Download subtitles failed: {safe_exc(e)}")
         return "File not found", 404
 
 @app.route("/download/audio/<job_id>")
@@ -867,7 +1004,7 @@ def download_audio(job_id):
             )
         return "File not found", 404
     except Exception as e:
-        print(f"[ERROR] Download audio failed: {e}")
+        print(f"[ERROR] Download audio failed: {safe_exc(e)}")
         return "File not found", 404
 
 def _job_output_dir(job_id: str) -> Path:
@@ -923,7 +1060,7 @@ def retry_highlight(job_id):
             }
         ), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": redact(str(e))}), 500
 
 
 NO_STORE = {"Cache-Control": "no-store"}
@@ -963,7 +1100,7 @@ def api_highlight_url(job_id, lang_code):
         payload = _highlight_link(job_id, code, attachment)
     except s3.HighlightStoreError as exc:
         print(f"[S3] highlight link for {job_id}/{code} not issued: {exc.code}")
-        return jsonify({"error": str(exc), "code": exc.code}), s3.ERROR_STATUS.get(exc.code, 500), NO_STORE
+        return jsonify({"error": redact(str(exc)), "code": exc.code}), s3.ERROR_STATUS.get(exc.code, 500), NO_STORE
     except Exception as exc:  # noqa: BLE001 — log the type only; messages can carry sensitive detail
         print(f"[S3] highlight link for {job_id}/{code} failed: {type(exc).__name__}")
         return jsonify({"error": "S3 is unavailable for this highlight.", "code": "s3_unavailable"}), 503, NO_STORE
@@ -977,7 +1114,7 @@ def _redirect_to_stored_highlight(job_id: str, code: str, attachment: bool):
         payload = _highlight_link(job_id, code, attachment)
     except s3.HighlightStoreError as exc:
         print(f"[S3] highlight redirect for {job_id}/{code} not issued: {exc.code}")
-        return str(exc), s3.ERROR_STATUS.get(exc.code, 500), NO_STORE
+        return redact(str(exc)), s3.ERROR_STATUS.get(exc.code, 500), NO_STORE
     except Exception as exc:  # noqa: BLE001
         print(f"[S3] highlight redirect for {job_id}/{code} failed: {type(exc).__name__}")
         return "S3 is unavailable for this highlight.", 503, NO_STORE
@@ -1014,7 +1151,7 @@ def stream_highlight(job_id, lang_code: str = "en"):
     except ValueError:
         return "Invalid language", 400
     except Exception as e:
-        print(f"[ERROR] Stream highlight failed: {e}")
+        print(f"[ERROR] Stream highlight failed: {safe_exc(e)}")
         return "File not found", 404
 
 
@@ -1045,7 +1182,7 @@ def download_highlight(job_id, lang_code: str = "en"):
     except ValueError:
         return "Invalid language", 400
     except Exception as e:
-        print(f"[ERROR] Download highlight failed: {e}")
+        print(f"[ERROR] Download highlight failed: {safe_exc(e)}")
         return "File not found", 404
 
 def log_runpod_ssh_health_on_startup() -> None:
@@ -1082,7 +1219,7 @@ def log_runpod_ssh_health_on_startup() -> None:
         if status.get("error"):
             print(f"[startup] SSH probe: {status['error'][:500]}")
     except Exception as exc:
-        print(f"[startup] RunPod SSH health check skipped: {exc}")
+        print(f"[startup] RunPod SSH health check skipped: {safe_exc(exc)}")
 
 
 if __name__ == "__main__":

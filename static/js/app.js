@@ -301,6 +301,18 @@ function initResultsPage(jobId, results) {
  applyResultsLanguageView();
 }
 
+// What one requested highlight language shows. Not generated is neutral, never a failure; only attempted and
+// failed languages are shown as Failed, with the reason. Pure function, so it can be tested without a browser.
+function highlightRowView(row) {
+ if (row.status === 'success' && row.download_available) {
+ return { ok: true, symbol: '✓', detail: '', background: 'rgba(46,125,50,0.12)' };
+ }
+ if (row.status === 'not_generated') {
+ return { ok: false, symbol: '○', detail: 'Not generated', background: 'rgba(100,100,100,0.08)' };
+ }
+ return { ok: false, symbol: '✗', detail: row.message || 'Failed', background: 'rgba(198,40,40,0.1)' };
+}
+
 function renderHighlightDownloads(jobId, results) {
  const card = document.getElementById('highlightResultCard');
  const list = document.getElementById('highlightDownloadList');
@@ -328,10 +340,9 @@ function renderHighlightDownloads(jobId, results) {
  if (statusList && statusRows.length > 0) {
  statusList.innerHTML = statusRows
  .map((row) => {
- const ok = row.status === 'success' && row.download_available;
- const label = ok
- ? `✓ ${escapeHtml(row.name)} (${escapeHtml(row.code)})`
- : `✗ ${escapeHtml(row.name)} (${escapeHtml(row.code)})`;
+ const view = highlightRowView(row);
+ const ok = view.ok;
+ const label = `${view.symbol} ${escapeHtml(row.name)} (${escapeHtml(row.code)})`;
  const translatorLabel =
  row.translator === 'source' || row.code === 'en'
  ? 'English source'
@@ -348,8 +359,8 @@ function renderHighlightDownloads(jobId, results) {
  ]
  .filter(Boolean)
  .join(' · ')
- : escapeHtml(row.message || 'Failed');
- return `<div class="highlight-lang-row" style="margin: 8px 0; padding: 8px 10px; border-radius: 6px; background: ${ok ? 'rgba(46,125,50,0.12)' : 'rgba(198,40,40,0.1)'};"><strong>${label}</strong><div style="font-size: 0.9em; margin-top: 4px;">${detail}</div></div>`;
+ : escapeHtml(view.detail);
+ return `<div class="highlight-lang-row" style="margin: 8px 0; padding: 8px 10px; border-radius: 6px; background: ${view.background};"><strong>${label}</strong><div style="font-size: 0.9em; margin-top: 4px;">${detail}</div></div>`;
  })
  .join('');
  } else if (statusList) {
@@ -602,20 +613,53 @@ function resetProgressUI() {
  document.getElementById('logContent').innerHTML = '<div class="log-entry">Initializing...</div>';
 }
 
+let displayedPercent = 0;
+
+// Each poll tick carries the job, the polling generation, and a request sequence number. A response is applied only
+// if it is still for the job being shown, belongs to the current generation, and is newer than the last applied one.
+// The message to show for a failed job: the job's own sanitized error when the payload carries one.
+function failureMessageFor(data) {
+ const message = data && typeof data.error === 'string' ? data.error.trim() : '';
+ return message || 'An error occurred during processing';
+}
+
+let progressGeneration = 0;
+let pollSequence = 0;
+let appliedSequence = 0;
+
+function shouldApplyPoll(current, request) {
+ if (request.jobId !== current.jobId) return false;             // the user switched jobs
+ if (request.generation !== current.generation) return false;   // from a previous polling run
+ if (request.responseJobId != null && request.responseJobId !== request.jobId) return false;
+ return request.sequence > current.appliedSequence;             // older than an update already applied
+}
+
 function startProgressPolling() {
  if (progressPoller) clearInterval(progressPoller);
+ displayedPercent = 0;
+ const generation = ++progressGeneration;
+ const jobId = currentJobId;
+ pollSequence = 0;
+ appliedSequence = 0;
 
  progressPoller = setInterval(async () => {
- if (!currentJobId) {
+ if (!currentJobId || generation !== progressGeneration) {
  clearInterval(progressPoller);
  return;
  }
+ const sequence = ++pollSequence;
 
  try {
- const response = await fetch(`${API_BASE}/progress/${currentJobId}`);
+ const response = await fetch(`${API_BASE}/progress/${jobId}`);
  if (!response.ok) throw new Error('Failed to fetch progress');
 
  const data = await response.json();
+ const accept = shouldApplyPoll(
+ { jobId: currentJobId, generation: progressGeneration, appliedSequence },
+ { jobId, generation, sequence, responseJobId: data.job_id }
+ );
+ if (!accept) return;
+ appliedSequence = sequence;
  console.log('[PROGRESS]', data);
 
  updateProgressUI(data);
@@ -624,7 +668,7 @@ function startProgressPolling() {
  if (data.status === 'completed' || data.status === 'error') {
  clearInterval(progressPoller);
  if (data.status === 'error') {
- showError(data.error || 'An error occurred during processing');
+ showError(failureMessageFor(data));
  } else {
  showResults(data);
  }
@@ -635,18 +679,64 @@ function startProgressPolling() {
  }, PROGRESS_POLL_INTERVAL);
 }
 
+// What the progress bar should show for one status payload. It shows confirmed backend progress only:
+// it never moves backward within a job, never shows 100 before the job is completed, and shows no number for a
+// stage whose progress cannot be measured (indeterminate). Pure function, so it can be tested without a browser.
+const STEP_LABELS = {
+ downloading: 'Downloading video',
+ extracting_audio: 'Extracting audio',
+ transcribing: 'Transcribing',
+ summarizing: 'Summarizing',
+ translating: 'Translating summary',
+ generating_audio: 'Generating narration',
+ generating_subtitles: 'Generating subtitles',
+ highlight_assembly: 'Rendering highlight video',
+ highlight_complete: 'Finishing highlight video',
+};
+
+function stageLabel(step) {
+ return STEP_LABELS[step] || 'Working';
+}
+
+function progressViewFor(data, previousPercent) {
+ const previous = previousPercent || 0;
+ if (data.status === 'completed') {
+ return { percent: 100, indeterminate: false, label: 'Completed' };
+ }
+ if (data.status === 'error') {
+ return { percent: previous, indeterminate: false, label: 'Failed' };
+ }
+ if (data.indeterminate) {
+ return { percent: previous, indeterminate: true, label: stageLabel(data.current_step) };
+ }
+ const confirmed = Math.min(99, Math.max(0, Math.round((Number(data.progress) || 0) * 100)));
+ return { percent: Math.max(previous, confirmed), indeterminate: false, label: null };
+}
+
 function updateProgressUI(data) {
  const { progress, current_step, status, log_lines } = data;
 
  syncProgressJobIdDisplay();
 
  // Update overall progress
- const percent = Math.round(progress * 100);
- document.getElementById('progressFill').style.width = percent + '%';
- document.getElementById('progressText').textContent = percent + '%';
+ const view = progressViewFor(data, displayedPercent);
+ displayedPercent = view.percent;
+ const fill = document.getElementById('progressFill');
+ if (view.indeterminate) {
+ fill.classList.add('indeterminate');
+ fill.style.width = '40%';
+ const elapsed = Number(data.stage_elapsed_sec) || 0;
+ const remote = data.progress_source === 'runpod' ? ' (RunPod GPU)' : '';
+ document.getElementById('progressText').textContent =
+ `${stageLabel(current_step)}${remote} · ${elapsed}s`;
+ } else {
+ fill.classList.remove('indeterminate');
+ fill.style.width = view.percent + '%';
+ document.getElementById('progressText').textContent = view.percent + '%';
+ }
 
  // Update subtasks based on current step and progress percentage
- updateSubtaskUI(current_step, progress);
+ updateSubtaskUI(current_step, view.percent);
 
  // Update logs
  if (log_lines && log_lines.length > 0) {
@@ -658,27 +748,44 @@ function updateProgressUI(data) {
  }
 }
 
-function updateSubtaskUI(currentStep, progress) {
- // Mark completed subtasks
- let targetPercent = 0;
- for (const [step, stepPercent] of Object.entries(SUBTASK_STEPS)) {
- const subtaskId = `subtask-${SUBTASK_NAMES[step]}`;
- const subtask = document.getElementById(subtaskId);
- if (!subtask) continue;
+// Which subtask to show as active or completed for a displayed percentage. Pure, so it can be tested.
+function subtaskStates(currentStep, displayedPercent) {
+ const states = {};
+ for (const step of Object.keys(SUBTASK_STEPS)) {
+ if (step === currentStep) states[step] = 'active';
+ else if (SUBTASK_STEPS[step] < displayedPercent) states[step] = 'completed';
+ else states[step] = 'pending';
+ }
+ return states;
+}
 
- if (step === currentStep) {
- subtask.classList.add('active');
- subtask.classList.remove('completed');
- subtask.querySelector('.subtask-checkbox').textContent = '';
- } else if (SUBTASK_STEPS[step] < (progress * 100)) {
- subtask.classList.add('completed');
- subtask.classList.remove('active');
- subtask.querySelector('.subtask-checkbox').textContent = '';
- } else {
- subtask.classList.remove('completed', 'active');
+function updateSubtaskUI(currentStep, displayedPercent) {
+ const states = subtaskStates(currentStep, displayedPercent);
+ for (const [step, state] of Object.entries(states)) {
+ const subtask = document.getElementById(`subtask-${SUBTASK_NAMES[step]}`);
+ if (!subtask) continue;
+ subtask.classList.toggle('active', state === 'active');
+ subtask.classList.toggle('completed', state === 'completed');
  subtask.querySelector('.subtask-checkbox').textContent = '';
  }
+}
+
+// One results request, checked before its JSON is trusted. A failed job answers with its own error (422 or 500).
+async function fetchResultsOrError(jobId) {
+ let response;
+ try {
+ response = await fetch(`${API_BASE}/results/${jobId}`, { cache: 'no-store' });
+ } catch (err) {
+ return { ok: false, error: 'Could not reach the server to load this job.' };
  }
+ const body = await response.json().catch(() => null);
+ if (response.ok) {
+ if (body && typeof body === 'object') return { ok: true, results: body };
+ return { ok: false, error: 'The job result could not be read.' };
+ }
+ if (body && body.error) return { ok: false, error: body.error, code: body.code || null, status: response.status };
+ if (response.status === 404) return { ok: false, error: 'This job was not found.', status: 404 };
+ return { ok: false, error: `Could not load this job (HTTP ${response.status}).`, status: response.status };
 }
 
 async function showResults(data) {
@@ -691,10 +798,12 @@ async function showResults(data) {
 
  try {
  // Fetch final results
- const response = await fetch(`${API_BASE}/results/${currentJobId}`);
- if (!response.ok) throw new Error('Failed to fetch results');
-
- const results = await response.json();
+ const outcome = await fetchResultsOrError(currentJobId);
+ if (!outcome.ok) {
+ showError(outcome.error);
+ return;
+ }
+ const results = outcome.results;
  console.log('[RESULTS]', results);
 
  initResultsPage(currentJobId, results);
@@ -862,34 +971,35 @@ function loadJobResults(jobId, updateUrl = true) {
  // Scroll to results
  window.scrollTo(0, 0);
 
- fetch(`${API_BASE}/results/${jobId}`)
- .then(r => {
- console.log('[LOAD JOB] Response status:', r.status);
- return r.json();
- })
- .then(results => {
- console.log('[LOAD JOB] Results received:', results);
+  fetchResultsOrError(jobId)
+  .then(outcome => {
+  if (!outcome.ok) {
+  showError(outcome.error);
+  return;
+  }
+  const results = outcome.results;
+  console.log('[LOAD JOB] Results received:', results);
 
- initResultsPage(jobId, results);
+  initResultsPage(jobId, results);
 
- // Update stats
- const origLength = (results.transcript_length || 0);
- const summLength = (results.summary_length || 0);
- const compression = origLength > 0 ? Math.round((1 - summLength / origLength) * 100) : 0;
+  // Update stats
+  const origLength = (results.transcript_length || 0);
+  const summLength = (results.summary_length || 0);
+  const compression = origLength > 0 ? Math.round((1 - summLength / origLength) * 100) : 0;
 
- document.getElementById('originalLength').textContent = `${Math.round(origLength / 100) / 10}k chars`;
- document.getElementById('summaryLength').textContent = `${Math.round(summLength / 100) / 10}k chars`;
- document.getElementById('compression').textContent = `${compression}%`;
+  document.getElementById('originalLength').textContent = `${Math.round(origLength / 100) / 10}k chars`;
+  document.getElementById('summaryLength').textContent = `${Math.round(summLength / 100) / 10}k chars`;
+  document.getElementById('compression').textContent = `${compression}%`;
 
- console.log('[LOAD JOB] Summary loaded successfully');
- })
- .catch(e => {
- console.error('[LOAD RESULTS ERROR]', e);
- const el = document.getElementById('summaryContentDisplay');
- if (el) {
- el.innerHTML = '<p style="color: red;">Error loading summary. Please try again.</p>';
- }
- });
+  console.log('[LOAD JOB] Summary loaded successfully');
+  })
+  .catch(e => {
+  console.error('[LOAD RESULTS ERROR]', e);
+  const el = document.getElementById('summaryContentDisplay');
+  if (el) {
+  el.innerHTML = '<p style="color: red;">Error loading summary. Please try again.</p>';
+  }
+  });
 }
 
 function getJobIdFromPath() {

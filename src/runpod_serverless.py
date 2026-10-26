@@ -1,6 +1,7 @@
 """RunPod Serverless API: deploy, jobs, status (delayTime), workers, volumes."""
 
 from __future__ import annotations
+from src.log_safety import redact
 
 import json
 import os
@@ -267,7 +268,7 @@ def _enable_workers_if_paused(endpoint_id: str, log: Callable[[str], None]) -> b
     """Raise max workers only when the endpoint is paused. Returns True if this call changed it."""
     live, err = get_serverless_endpoint(endpoint_id)
     if err or not live:
-        log(f"Could not read endpoint before submit ({err}); submitting and letting RunPod decide.")
+        log(f"Could not read endpoint before submit ({redact(err)}); submitting and letting RunPod decide.")
         return False
     if (live.get("workers") or {}).get("max", 0) > 0:
         return False

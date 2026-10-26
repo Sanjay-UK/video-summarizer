@@ -1,6 +1,7 @@
 """End-to-end highlight video pipeline (multi-language, opt-in)."""
 
 from __future__ import annotations
+from src.log_safety import redact, safe_exc
 
 import json
 import os
@@ -176,6 +177,7 @@ def _write_lang_failure(
     translation_seconds: float = 0.0,
     translator_backend: str = "",
 ) -> None:
+    message = redact(message)  # persisted to the status file and shown in the UI: never keep secrets
     highlight_root = job_output_dir / "highlights" / lang
     highlight_root.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -451,7 +453,7 @@ def run_highlight_pipeline(
                     translation_seconds=translations[lang].translation_seconds,
                     translator_backend=translations[lang].translator_backend,
                 )
-                print(f"[WARN] Highlight render {lang} failed: {exc}", file=sys.stderr)
+                print(f"[WARN] Highlight render {lang} failed: {safe_exc(exc)}", file=sys.stderr)
 
     if "en" in lang_codes and "en" not in results and len(lang_codes) == 1:
         raise RuntimeError(errors.get("en", translations.get("en", LanguageTranslationOutcome("en", [])).message or "English highlight failed"))

@@ -1,6 +1,7 @@
 """Rewrite topic summaries into natural spoken narration."""
 
 from __future__ import annotations
+from src.log_safety import safe_exc
 
 import re
 import sys
@@ -113,7 +114,7 @@ def _enforce_word_limit(text: str, max_words: int, model: str, topic_title: str)
         if shortened:
             text = shortened
     except Exception as exc:
-        print(f"[WARN] Shorten re-prompt failed: {exc}", file=sys.stderr)
+        print(f"[WARN] Shorten re-prompt failed: {safe_exc(exc)}", file=sys.stderr)
 
     truncated = truncate_at_sentence_boundary(text, max_words)
     if count_words(truncated) > max_words:
@@ -144,7 +145,7 @@ def rewrite_for_speech(
     try:
         text = _call_ollama(prompt, model)
     except Exception as exc:
-        print(f"[WARN] Narration rewrite failed: {exc}", file=sys.stderr)
+        print(f"[WARN] Narration rewrite failed: {safe_exc(exc)}", file=sys.stderr)
         text = ""
 
     if not text:

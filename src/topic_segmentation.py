@@ -1,6 +1,7 @@
 """Topic shifts for highlight video via Ollama JSON mode."""
 
 from __future__ import annotations
+from src.log_safety import safe_exc
 
 import json
 import sys
@@ -211,7 +212,7 @@ def segment_topics_in_chunk(
             raise ValueError("No valid topics in JSON")
         except Exception as exc:
             last_error = exc
-            print(f"[WARN] Topic parse attempt {attempt + 1} failed: {exc}", file=sys.stderr)
+            print(f"[WARN] Topic parse attempt {attempt + 1} failed: {safe_exc(exc)}", file=sys.stderr)
 
     raise RuntimeError(f"Topic segmentation failed after retry: {last_error}")
 
@@ -326,7 +327,7 @@ def run_topic_segmentation(
             all_scenes.extend(chunk_scenes)
             rolling = _rolling_context_from_scenes(all_scenes)
     except Exception as exc:
-        print(f"[WARN] Topic segmentation fallback: {exc}", file=sys.stderr)
+        print(f"[WARN] Topic segmentation fallback: {safe_exc(exc)}", file=sys.stderr)
         return merge_topics_within_gap(
             fallback_evenly_spaced_scenes(segments),
             segments,

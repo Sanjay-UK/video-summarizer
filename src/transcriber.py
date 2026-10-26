@@ -1,6 +1,8 @@
 """Transcribe audio using faster-whisper with domain-specific term correction."""
 
 import json
+
+from src.job_progress import report_progress
 import sys
 from pathlib import Path
 from config import OUTPUT_DIR, SUBTITLE_GEN_DIR, WHISPER_DEVICE, WHISPER_MODEL
@@ -121,7 +123,14 @@ def transcribe_audio(audio_path, model=None, output_dir=None, device=None):
         initial_prompt=initial_prompt if initial_prompt else None,
     )
     
-    segments = [{"start": seg.start, "end": seg.end, "text": seg.text} for seg in segments]
+    total_seconds = float(getattr(info, "duration", 0) or 0)
+    collected = []
+    for seg in segments:
+        collected.append({"start": seg.start, "end": seg.end, "text": seg.text})
+        if total_seconds > 0:
+            # Measured: audio seconds transcribed so far, out of the audio duration.
+            report_progress(min(float(seg.end) / total_seconds, 1.0))
+    segments = collected
     
     print("[INFO] Pass 2: Applying corrections...")
     segments, corrections_made, uncertain_found = correct_transcript(segments)

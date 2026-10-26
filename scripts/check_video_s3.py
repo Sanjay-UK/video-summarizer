@@ -9,6 +9,7 @@ Usage (from the project root):
 """
 
 from __future__ import annotations
+from src.log_safety import safe_exc
 
 import sys
 from pathlib import Path
@@ -91,7 +92,7 @@ def main() -> int:
         try:
             session = boto3.Session(profile_name=profile)
         except Exception as exc:  # noqa: BLE001
-            print(f"Profile '{profile}' could not be loaded: {exc}")
+            print(f"Profile '{profile}' could not be loaded: {safe_exc(exc)}")
             return 2
     else:
         session = boto3.Session()

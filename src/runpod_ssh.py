@@ -1,6 +1,7 @@
 """RunPod SSH/SCP helpers (proxy SSH command from deploy status)."""
 
 from __future__ import annotations
+from src.log_safety import redact
 
 import os
 import posixpath
@@ -217,12 +218,12 @@ def get_runpod_ssh_probe_status() -> dict[str, str | bool | None]:
     try:
         target = get_runpod_ssh_target()
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "target": None}
+        return {"ok": False, "error": redact(str(exc)), "target": None}
     try:
         probe_runpod_ssh_reachable(target=target)
         return {"ok": True, "error": None, "target": target.spec}
     except RuntimeError as exc:
-        return {"ok": False, "error": str(exc), "target": target.spec}
+        return {"ok": False, "error": redact(str(exc)), "target": target.spec}
 
 
 def _format_ssh_failure(

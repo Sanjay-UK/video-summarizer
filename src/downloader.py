@@ -8,6 +8,14 @@ from urllib.parse import urlparse
 
 import yt_dlp
 
+from src.log_safety import redact
+from src.youtube_errors import (
+    YOUTUBE_DOWNLOAD_FAILED,
+    YouTubeDownloadError,
+    classify_youtube_error,
+    pick_error_text,
+)
+
 from config import DOWNLOADS_DIR
 
 ALLOWED_NETLOCS = ("www.youtube.com", "youtube.com", "youtu.be", "www.youtu.be")
@@ -96,7 +104,7 @@ def get_video_meta(url: str) -> Tuple[str, str, List[Tuple[int, str]]]:
     return title, video_id, qualities
 
 
-def _build_download_opts(out_dir: Path, base_name: str, quality: int) -> dict:
+def _build_download_opts(out_dir: Path, base_name: str, quality: int, progress_hook=None) -> dict:
     format_str = (
         f"bestvideo[height<={quality}]+bestaudio/"
         f"best[height<={quality}]/best"
@@ -112,17 +120,18 @@ def _build_download_opts(out_dir: Path, base_name: str, quality: int) -> dict:
         "fragment_retries": 10,
         "retries": 5,
         "skip_unavailable_fragments": True,
+        **({"progress_hooks": [progress_hook]} if progress_hook else {}),
     }
 
 
-def _try_download(url: str, opts: dict) -> bool:
-    """Attempt a yt-dlp download. Returns True if successful."""
+def _try_download(url: str, opts: dict) -> Optional[str]:
+    """Attempt a yt-dlp download. Returns None on success, or the yt-dlp error text on failure."""
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
             ydl.download([url])
-            return True
-        except yt_dlp.utils.DownloadError:
-            return False
+            return None
+        except yt_dlp.utils.DownloadError as exc:
+            return redact(str(exc)) or "download failed"
 
 
 def _download_with_clients(
@@ -130,17 +139,22 @@ def _download_with_clients(
     out_dir: Path,
     base_name: str,
     quality: int,
-) -> Optional[Path]:
-    """Try downloading with each YouTube player client fallback."""
+    progress_hook=None,
+) -> tuple[Optional[Path], Optional[str]]:
+    """Try each YouTube player client. Returns (path, last_error_text); path is None when all clients fail."""
     video_path = out_dir / f"{base_name}.mp4"
-    base_opts = _build_download_opts(out_dir, base_name, quality)
+    base_opts = _build_download_opts(out_dir, base_name, quality, progress_hook)
+    errors: list[str] = []
 
     for client_args in YOUTUBE_CLIENT_FALLBACKS:
         client_name = client_args["extractor_args"]["youtube"]["player_client"]
         print(f"[INFO] Trying player client(s): {', '.join(client_name)}")
         opts = {**base_opts, **client_args}
-        if _try_download(url, opts) and video_path.exists():
-            return video_path
+        error = _try_download(url, opts)
+        if error is None and video_path.exists():
+            return video_path, None
+        if error:
+            errors.append(error)
 
         # yt-dlp may write a different extension before merge
         for candidate in out_dir.glob(f"{base_name}.*"):
@@ -148,9 +162,9 @@ def _download_with_clients(
                 if candidate != video_path and candidate.suffix.lower() != ".mp4":
                     candidate.rename(video_path)
                 if video_path.exists():
-                    return video_path
+                    return video_path, None
 
-    return None
+    return None, pick_error_text(errors) or "download failed with all player clients"
 
 
 def get_local_video(file_path: Union[Path, str]) -> Path:
@@ -176,8 +190,13 @@ def download_youtube_video(
     output_dir=None,
     quality: int = 720,
     max_retries: int = 3,
+    progress_hook=None,
 ) -> Path:
-    """Download a YouTube video using yt-dlp with player-client fallbacks."""
+    """Download a YouTube video using yt-dlp with player-client fallbacks.
+
+    Raises YouTubeDownloadError with a stable code. Deterministic failures (sign-in, private, unavailable) stop
+    at once, without retries or waiting.
+    """
     if output_dir is None:
         output_dir = DOWNLOADS_DIR
     else:
@@ -188,7 +207,7 @@ def download_youtube_video(
     if not is_allowed_youtube_url(url):
         raise ValueError(f"Invalid YouTube URL: {url}")
 
-    last_error = None
+    last_error: Optional[YouTubeDownloadError] = None
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -205,24 +224,35 @@ def download_youtube_video(
             out_dir = output_dir / short_name
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            video_path = _download_with_clients(url, out_dir, short_name, quality)
+            video_path, client_error = _download_with_clients(
+                url, out_dir, short_name, quality, progress_hook
+            )
             if video_path and video_path.exists():
                 print(f"[DONE] Video downloaded: {video_path}")
                 print(f"       Size: {video_path.stat().st_size / (1024 * 1024):.1f} MB")
                 return video_path
 
-            raise RuntimeError("Download failed with all player clients")
+            raise YouTubeDownloadError(classify_youtube_error(client_error or ""), client_error or "")
 
-        except Exception as e:
-            last_error = str(e)
-            print(f"[WARN] Attempt {attempt} failed: {e}")
+        except YouTubeDownloadError as e:
+            last_error = e
+        except Exception as e:  # noqa: BLE001 — classified below; never swallowed silently
+            last_error = YouTubeDownloadError(classify_youtube_error(str(e)), str(e))
 
-            if attempt < max_retries:
-                wait_time = min(2 ** attempt, 30)
-                print(f"[INFO] Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
+        print(f"[WARN] Attempt {attempt} failed: {last_error.code}")
+        print(f"[WARN] Detail: {last_error.detail}")
+        if not last_error.retryable:
+            print("[INFO] This failure will not succeed on retry; stopping.")
+            raise last_error
+        if attempt < max_retries:
+            wait_time = min(2 ** attempt, 30)
+            print(f"[INFO] Retrying in {wait_time} seconds...")
+            time.sleep(wait_time)
 
-    raise RuntimeError(f"YouTube download failed after {max_retries} attempts: {last_error}")
+    raise YouTubeDownloadError(
+        last_error.code if last_error else YOUTUBE_DOWNLOAD_FAILED,
+        f"after {max_retries} attempts: {last_error.detail if last_error else ''}",
+    )
 
 
 def handle_video_source(source: Union[str, Path], output_dir=None, quality: int = 720) -> Path:

@@ -1,5 +1,6 @@
 """Summarize transcripts using Ollama/Llama with intelligent prompt engineering."""
 
+from src.log_safety import safe_exc, safe_traceback
 import json
 import re
 import sys
@@ -41,7 +42,7 @@ def test_ollama():
         
         return True
     except Exception as e:
-        print(f"[ERROR] Ollama connection failed: {e}")
+        print(f"[ERROR] Ollama connection failed: {safe_exc(e)}")
         print("[ERROR] Make sure Ollama is running: ollama serve")
         return False
 
@@ -234,7 +235,7 @@ RANKED CONCEPTS:
         return '\n'.join(f"[{priority}][chunk:{chunk_index}] {text}" for priority, text in ranked)
 
     except Exception as e:
-        print(f"[ERROR] Concept extraction failed: {e}")
+        print(f"[ERROR] Concept extraction failed: {safe_exc(e)}")
         raise
 
 
@@ -476,7 +477,7 @@ def summarize_with_ollama(text: str, model: str = None, compression: str = "medi
         return summary
 
     except Exception as e:
-        print(f"[ERROR] Ollama summarization failed: {e}")
+        print(f"[ERROR] Ollama summarization failed: {safe_exc(e)}")
         raise
 
 
@@ -588,7 +589,7 @@ def summarize_transcript(
             chunk_concepts = extract_and_rank_concepts(chunk, model=model, chunk_index=i)
             all_concepts.append(chunk_concepts)
         except Exception as e:
-            print(f"[WARN] Concept extraction failed for chunk {i+1}: {e}")
+            print(f"[WARN] Concept extraction failed for chunk {i+1}: {safe_exc(e)}")
 
     aggregated_concepts = '\n'.join(all_concepts)
     if not any(line.startswith('[') for line in aggregated_concepts.split('\n')):
@@ -621,7 +622,7 @@ def summarize_transcript(
             )
             summaries.append(chunk_summary)
         except Exception as e:
-            print(f"[WARN] Chunk {i+1} summarization failed: {e}")
+            print(f"[WARN] Chunk {i+1} summarization failed: {safe_exc(e)}")
 
     # Concatenate the already concept-selected chunk summaries directly.
     # No second LLM re-summarization pass here — that previously re-compressed
@@ -708,7 +709,7 @@ if __name__ == "__main__":
             )
             print("\n✅ Summarization complete!")
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            print(f"\n❌ Error: {safe_exc(e)}")
             import traceback
-            traceback.print_exc()
+            print(safe_traceback())
             sys.exit(1)

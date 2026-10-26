@@ -1,6 +1,7 @@
 """Persist compute selection and trigger provider deploy."""
 
 from __future__ import annotations
+from src.log_safety import redact
 
 import json
 import os
@@ -246,7 +247,7 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
     except RuntimeError as exc:
         return {
             "status": "failed",
-            "message": str(exc),
+            "message": redact(str(exc)),
             "pod_id": "",
             "endpoint_id": "",
             "network_volume_id": "",
@@ -258,7 +259,7 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
     except RuntimeError as exc:
         return {
             "status": "failed",
-            "message": str(exc),
+            "message": redact(str(exc)),
             "pod_id": "",
             "endpoint_id": "",
             "network_volume_id": "",
@@ -362,7 +363,7 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
     except RuntimeError as exc:
         return {
             "status": "failed",
-            "message": str(exc),
+            "message": redact(str(exc)),
             "pod_id": "",
             "endpoint_id": "",
             "network_volume_id": volume_id,
@@ -412,7 +413,7 @@ def _deploy_runpod(offer: dict[str, Any], api_key: str) -> dict[str, Any]:
     except ValueError as exc:
         return {
             "status": "failed",
-            "message": str(exc),
+            "message": redact(str(exc)),
             "pod_id": "",
             "provider_response": {},
         }
@@ -493,7 +494,7 @@ def stop_saved_runpod_workers() -> dict[str, Any]:
     try:
         stop_serverless_workers(endpoint_id)
     except RuntimeError as exc:
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": redact(str(exc))}
 
     deploy["message"] = f"Serverless workers scaled to 0 for endpoint {endpoint_id}."
     deploy["updated_at"] = _utc_now()
@@ -532,7 +533,7 @@ def delete_saved_network_volume(*, confirm: str) -> dict[str, Any]:
             detach_network_volume_from_endpoint(endpoint_id)
         delete_network_volume(volume_id)
     except RuntimeError as exc:
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": redact(str(exc))}
 
     deploy["network_volume_id"] = ""
     deploy["message"] = f"Network volume {volume_id} deleted. Model cache on volume is gone."
@@ -749,7 +750,7 @@ def save_selection_and_deploy(
                     err = publish_info.get("error") or "Docker publish failed"
                     tail = publish_info.get("build_log_tail")
                     if tail:
-                        err = f"{err}\n\n--- build log (tail) ---\n{tail[-2000:]}"
+                        err = f"{redact(err)}\n\n--- build log (tail) ---\n{tail[-2000:]}"
                     deploy = {
                         "status": "failed",
                         "message": err,

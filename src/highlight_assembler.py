@@ -31,20 +31,14 @@ def _video_scale_filter() -> str:
 
 
 def _fonts_dir_for_ffmpeg() -> Path:
-    """Stage bundled highlight fonts for libass (all scripts in static/fonts)."""
-    dest = Path(tempfile.gettempdir()) / "highlight_fonts"
-    dest.mkdir(parents=True, exist_ok=True)
-    sources = [FONTS_DIR, PROJECT_DIR / "static" / "fonts"]
-    seen: set[str] = set()
-    for src_dir in sources:
-        if not src_dir.is_dir():
-            continue
-        for font in src_dir.glob("*.ttf"):
-            if font.name in seen:
-                continue
-            seen.add(font.name)
-            shutil.copy2(font, dest / font.name)
-    return dest
+    """Bundled highlight fonts for libass. Used read-only: nothing is copied, so concurrent jobs cannot race.
+
+    The worker image copies static/fonts to this path. If it is missing, libass draws boxes for non-Latin text,
+    and the glyph check in mux_scene reports that as a failed highlight instead of shipping it.
+    """
+    if not (FONTS_DIR.is_dir() and any(FONTS_DIR.glob("*.ttf"))):
+        print(f"[WARN] Bundled caption fonts not found at {FONTS_DIR}; non-Latin subtitles may fail.")
+    return FONTS_DIR
 
 
 def _subtitles_filter(ass_path: Path) -> str:
@@ -204,6 +198,18 @@ def _ass_path_for_ffmpeg(ass_path: Path) -> Path:
     return tmp
 
 
+class SubtitleFontError(RuntimeError):
+    """The subtitle font cannot draw the text. The highlight for this language is failed, not rendered with boxes."""
+
+
+MISSING_GLYPH_MARKER = "failed to find any fallback with glyph"
+
+
+def subtitle_glyphs_missing(ffmpeg_stderr: str) -> bool:
+    """True when libass reports that no available font has a glyph for some character."""
+    return MISSING_GLYPH_MARKER in (ffmpeg_stderr or "").lower()
+
+
 def mux_scene(
     visual_video: Path,
     padded_audio: Path,
@@ -214,7 +220,7 @@ def mux_scene(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ass_for_filter = _ass_path_for_ffmpeg(ass_path)
     vf = f"{_video_scale_filter()},{_subtitles_filter(ass_for_filter)}"
-    run_ffmpeg(
+    stderr = run_ffmpeg(
         [
             "-i",
             str(visual_video),
@@ -238,6 +244,12 @@ def mux_scene(
             str(output_path),
         ]
     )
+    if subtitle_glyphs_missing(stderr):
+        # Without the glyphs the subtitles would be drawn as empty boxes. Fail instead of shipping that.
+        raise SubtitleFontError(
+            "Subtitles could not be drawn: the caption font has no glyphs for this text. "
+            "The worker needs the bundled fonts in static/fonts."
+        )
     return output_path
 
 

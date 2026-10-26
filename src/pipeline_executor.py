@@ -1,6 +1,7 @@
 """Hybrid local/RunPod execution for heavy vs light pipeline steps."""
 
 from __future__ import annotations
+from src.log_safety import redact
 
 import json
 import os
@@ -20,6 +21,7 @@ from src.runpod_ssh import (
     ssh_run,
     sync_project_bundle,
 )
+from src.job_progress import report_stage
 from src.summary_translate import translate_summary_for_languages
 from src.summarizer import summarize_transcript
 from src.transcriber import transcribe_audio
@@ -141,6 +143,7 @@ class LocalPipelineExecutor(PipelineExecutor):
             output_dir=job_output_dir,
             device="cpu",
         )
+        report_stage("summarizing", 0.60, indeterminate=True)
         summarize_transcript(
             transcript_path=job_output_dir / "transcript.txt",
             segments_path=job_output_dir / "segments.json",
@@ -152,6 +155,9 @@ class LocalPipelineExecutor(PipelineExecutor):
         from src.locales import parse_language_list
 
         langs = parse_language_list(highlight_languages)
+        if any(code != "en" for code in langs):
+            # Translation is its own stage. Per-language progress is not reported, so the stage is indeterminate.
+            report_stage("translating", 0.60, indeterminate=True)
         translate_summary_for_languages(job_output_dir, summary_text, langs)
 
 
@@ -369,7 +375,7 @@ class HybridRunpodPipelineExecutor(PipelineExecutor):
         except RuntimeError as exc:
             if transport != "auto":
                 raise
-            log(f"RunPod SSH path failed ({str(exc)[:200]}…); falling back to Jupyter HTTP.")
+            log(f"RunPod SSH path failed ({redact(str(exc))[:200]}…); falling back to Jupyter HTTP.")
             from src.runpod_jupyter import run_heavy_phase_via_jupyter
 
             run_heavy_phase_via_jupyter(

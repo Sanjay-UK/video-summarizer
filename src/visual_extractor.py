@@ -1,6 +1,7 @@
 """Extract stills/clips and placeholders for highlight scenes."""
 
 from __future__ import annotations
+from src.log_safety import safe_exc
 
 import subprocess
 import sys
@@ -264,7 +265,7 @@ def select_visual_for_scene(
                 best_score = score
                 best_path = frame_path
         except RuntimeError as exc:
-            print(f"[WARN] Frame extract failed at t={t:.2f}: {exc}", file=sys.stderr)
+            print(f"[WARN] Frame extract failed at t={t:.2f}: {safe_exc(exc)}", file=sys.stderr)
 
     if use_clip and best_score >= sharpness_threshold:
         clip_path = output_dir / f"scene_{scene_index:03d}_clip.mp4"

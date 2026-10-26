@@ -702,6 +702,21 @@ main {
     border-radius: 10px;
 }
 
+/* Stage without measurable progress: an animated band, so the bar moves but shows no percentage. */
+.progress-fill.indeterminate {
+    width: 40% !important;
+    animation: progress-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(260%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .progress-fill.indeterminate { animation: none; transform: none; }
+}
+
 .progress-percent {
     min-width: 45px;
     text-align: right;

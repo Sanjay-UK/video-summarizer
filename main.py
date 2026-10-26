@@ -7,6 +7,7 @@ Usage:
  python3 main.py "https://..." --highlight-video
 """
 
+from src.log_safety import safe_exc, safe_traceback
 import argparse
 import json
 import sys
@@ -66,7 +67,7 @@ def run_full_pipeline(
         outputs["transcript"] = OUTPUT_DIR / "transcript.txt"
         print()
     except Exception as e:
-        print(f" Week 1 failed: {e}")
+        print(f" Week 1 failed: {safe_exc(e)}")
         return outputs
 
     print("[WEEK 2] Summarization with Ollama/Llama")
@@ -84,7 +85,7 @@ def run_full_pipeline(
         outputs["summary"] = OUTPUT_DIR / "summary.txt"
         print()
     except Exception as e:
-        print(f" Week 2 failed: {e}")
+        print(f" Week 2 failed: {safe_exc(e)}")
         print(" (Make sure Ollama is running: ollama serve)")
         return outputs
 
@@ -109,7 +110,7 @@ def run_full_pipeline(
         outputs["audio_explanation"] = audio_exp_path
         print()
     except Exception as e:
-        print(f" Week 3 partial: {e}")
+        print(f" Week 3 partial: {safe_exc(e)}")
         print(" (Subtitles and audio may not have been generated)")
 
     if highlight_video:
@@ -134,7 +135,7 @@ def run_full_pipeline(
                 outputs["highlight_en"] = highlight_out
                 print(f"[DONE] Highlight: {highlight_out}")
         except Exception as e:
-            print(f"[WARN] Highlight generation failed: {e}")
+            print(f"[WARN] Highlight generation failed: {safe_exc(e)}")
 
     print("=" * 70)
     print(" PIPELINE COMPLETE")
@@ -235,10 +236,10 @@ Examples:
         print("\n\n Pipeline interrupted by user")
         sys.exit(1)
     except Exception as e:
-        print(f"\n Error: {e}")
+        print(f"\n Error: {safe_exc(e)}")
         import traceback
 
-        traceback.print_exc()
+        print(safe_traceback())
         sys.exit(1)
 
 

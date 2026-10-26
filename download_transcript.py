@@ -17,6 +17,7 @@ Dependencies: ffmpeg, yt-dlp, faster-whisper (pip install yt-dlp faster-whisper)
 """
 
 from __future__ import annotations
+from src.log_safety import safe_exc
 
 import json
 import re
@@ -358,7 +359,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             keep_work_dir=args.keep_temp or args.output_dir is not None,
         )
     except (ValueError, FileNotFoundError, RuntimeError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"Error: {safe_exc(exc)}", file=sys.stderr)
         return 1
 
     print(f"Transcript: {result.transcript_path} ({len(result.text)} chars)")

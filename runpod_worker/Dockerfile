@@ -25,6 +25,12 @@ RUN pip install --no-index --find-links /tmp/wheels --require-hashes -r /tmp/wor
 
 COPY config.py /app/config.py
 COPY src /app/src
+# Bundled Unicode fonts for highlight captions (Devanagari, Kannada, Tamil, Telugu, Latin).
+# Without them libass draws empty boxes for non-Latin text, because the base image has no Indic fonts.
+COPY static/fonts /app/static/fonts
+# Register the same fonts with fontconfig, so libass can fall back to them for mixed-script lines.
+COPY static/fonts /usr/share/fonts/truetype/video-summarizer/
+RUN fc-cache -f
 COPY runpod_worker/handler.py /app/runpod_worker/handler.py
 
 ENV PYTHONPATH=/app

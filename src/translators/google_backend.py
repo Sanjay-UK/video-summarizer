@@ -12,6 +12,8 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional, TypeVar
 
+from src.log_safety import redact, safe_exc
+
 from config import HIGHLIGHT_GOOGLE_REQUEST_DELAY_SEC
 from src.locales import LocaleSpec
 from src.translators.google_circuit import get_google_circuit_breaker
@@ -127,7 +129,7 @@ def _translate_via_urllib(text: str, target: str) -> str:
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
-            raise GoogleTranslateError(f"HTTP 429 from Google Translate: {exc}") from exc
+            raise GoogleTranslateError(f"HTTP 429 from Google Translate: {redact(str(exc))}") from exc
         raise
     parts = payload[0] if payload else []
     return "".join(str(chunk[0]) for chunk in parts if chunk and chunk[0]).strip()
@@ -163,7 +165,7 @@ def _trip_on_rate_limit(exc: Exception) -> None:
         return
     breaker = get_google_circuit_breaker()
     if breaker is not None:
-        breaker.trip(str(exc))
+        breaker.trip(redact(str(exc)))
 
 
 def _call_google_ratelimited(
@@ -204,19 +206,19 @@ def _call_google_ratelimited(
                     time.sleep(delay)
                     continue
                 _trip_on_rate_limit(exc)
-                raise GoogleTranslateError(f"Google {label} rate limited: {exc}") from exc
+                raise GoogleTranslateError(f"Google {label} rate limited: {redact(str(exc))}") from exc
 
             rate_limit_streak = 0
             if attempt >= _MAX_ATTEMPTS:
                 break
             delay = _INITIAL_BACKOFF_SEC * (2 ** (attempt - 1))
             print(
-                f"[WARN] Google {label} attempt {attempt} failed ({exc}); retry in {delay:.1f}s",
+                f"[WARN] Google {label} attempt {attempt} failed ({safe_exc(exc)}); retry in {delay:.1f}s",
                 file=sys.stderr,
             )
             time.sleep(delay)
 
-    raise GoogleTranslateError(f"Google {label} failed after {_MAX_ATTEMPTS} attempts: {last_err}")
+    raise GoogleTranslateError(f"Google {label} failed after {_MAX_ATTEMPTS} attempts: {redact(str(last_err))}")
 
 
 def _translate_pieces_joined(
@@ -318,11 +320,11 @@ def google_translator_probe() -> tuple[bool, str]:
     except GoogleTranslateError as exc:
         if is_rate_limit_error(exc):
             return True, "rate_limited"
-        return False, str(exc)
+        return False, redact(str(exc))
     except Exception as exc:
         if is_rate_limit_error(exc):
             return True, "rate_limited"
-        return False, str(exc)
+        return False, redact(str(exc))
 
 
 class GoogleSceneTranslator:

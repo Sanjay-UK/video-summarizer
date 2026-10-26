@@ -18,6 +18,7 @@ Limitations (see SETUP.md):
 """
 
 from __future__ import annotations
+from src.log_safety import safe_exc
 
 import json
 import os
@@ -118,11 +119,11 @@ def _set_capacity_zero(endpoint_id: str) -> CapacityResult:
             timeout=CAPACITY_REQUEST_TIMEOUT_SEC,
         )
     except Exception as exc:  # noqa: BLE001
-        return CapacityResult(False, False, f"capacity update failed ({type(exc).__name__}: {exc})")
+        return CapacityResult(False, False, f"capacity update failed ({safe_exc(exc)})")
     try:
         ep, err = rs.get_serverless_endpoint(endpoint_id, timeout=CAPACITY_REQUEST_TIMEOUT_SEC)
     except Exception as exc:  # noqa: BLE001
-        return CapacityResult(False, False, f"could not read endpoint back ({type(exc).__name__}: {exc})")
+        return CapacityResult(False, False, f"could not read endpoint back ({safe_exc(exc)})")
     if err or not ep:
         return CapacityResult(False, False, f"could not read endpoint back ({err or 'no data'})")
     max_workers = (ep.get("workers") or {}).get("max")
@@ -171,7 +172,7 @@ def release_lease(
     except Exception as exc:  # noqa: BLE001 — never mask the job's own exception
         try:
             log(
-                f"WARNING: lease release failed ({type(exc).__name__}: {exc}); "
+                f"WARNING: lease release failed ({safe_exc(exc)}); "
                 f"the lease expires after {LEASE_TTL_SEC // 3600} h."
             )
         except Exception:  # noqa: BLE001 — logging itself must not raise either
@@ -190,7 +191,7 @@ def lower_if_idle(endpoint_id: str, log: LogFn, *, lease_dir: Optional[Path] = N
             log(result.message if result.ok else f"WARNING: {result.message}")
             return result
     except Exception as exc:  # noqa: BLE001
-        return CapacityResult(False, False, f"capacity check failed ({type(exc).__name__}: {exc})")
+        return CapacityResult(False, False, f"capacity check failed ({safe_exc(exc)})")
 
 
 def startup_recovery(endpoint_id: str, log: LogFn, *, lease_dir: Optional[Path] = None) -> CapacityResult:
@@ -209,7 +210,7 @@ def startup_recovery(endpoint_id: str, log: LogFn, *, lease_dir: Optional[Path] 
             log(result.message if result.ok else f"WARNING: startup recovery failed: {result.message}")
             return result
     except Exception as exc:  # noqa: BLE001
-        msg = f"startup recovery failed ({type(exc).__name__}: {exc})"
+        msg = f"startup recovery failed ({safe_exc(exc)})"
         log(f"WARNING: {msg}")
         return CapacityResult(False, False, msg)
 
@@ -255,7 +256,7 @@ def start_background_recovery(
             try:
                 recovery_cycle(log)
             except Exception as exc:  # noqa: BLE001 — keep the loop alive; report the failure
-                log(f"[capacity] background recovery could not run ({type(exc).__name__}: {exc})")
+                log(f"[capacity] background recovery could not run ({safe_exc(exc)})")
 
     thread = threading.Thread(target=loop, name="capacity-recovery", daemon=True)
     thread.stop_event = stop  # type: ignore[attr-defined]
@@ -275,5 +276,5 @@ def startup_check(log: LogFn = print) -> Optional[CapacityResult]:
         log(f"[capacity] startup check for {endpoint_id}: {'OK' if result.ok else 'FAILED'} - {result.message}")
         return result
     except Exception as exc:  # noqa: BLE001
-        log(f"[capacity] startup check could not run ({type(exc).__name__}: {exc})")
+        log(f"[capacity] startup check could not run ({safe_exc(exc)})")
         return None

@@ -4,6 +4,7 @@ Edge TTS provides high-quality, natural-sounding voices from Microsoft.
 Much better quality than gTTS, free to use.
 """
 
+from src.log_safety import safe_exc
 import asyncio
 import subprocess
 import sys
@@ -82,7 +83,7 @@ async def generate_audio_async(text: str, output_path: Path) -> Path:
         return output_path
 
     except Exception as e:
-        print(f"[WARN] Edge TTS failed: {e}")
+        print(f"[WARN] Edge TTS failed: {safe_exc(e)}")
         raise
 
 
@@ -209,7 +210,7 @@ def generate_audio_explanation(
         raise
 
     except Exception as e:
-        print(f"[WARN] Edge TTS failed: {e}")
+        print(f"[WARN] Edge TTS failed: {safe_exc(e)}")
         print("[INFO] Falling back to gTTS...")
         audio_path = use_gtts_fallback(audio_transcript, output_path)
         return audio_path, audio_transcript
@@ -236,7 +237,7 @@ def use_gtts_fallback(text: str, output_path: Path) -> Path:
         return output_path
 
     except Exception as e:
-        print(f"[ERROR] Both TTS methods failed: {e}")
+        print(f"[ERROR] Both TTS methods failed: {safe_exc(e)}")
         print("[WARN] Creating dummy audio file to continue...")
         output_path.touch()
         return output_path

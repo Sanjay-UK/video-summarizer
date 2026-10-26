@@ -72,7 +72,8 @@ def resolve_ffprobe_bin() -> str:
     return which if which else "ffprobe"
 
 
-def run_ffmpeg(args: list[str]) -> None:
+def run_ffmpeg(args: list[str]) -> str:
+    """Run ffmpeg and return its stderr. libass reports missing glyphs there even when ffmpeg succeeds."""
     result = subprocess.run(
         [resolve_ffmpeg_bin(), "-y", *args],
         capture_output=True,
@@ -80,6 +81,7 @@ def run_ffmpeg(args: list[str]) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "ffmpeg failed")
+    return result.stderr or ""
 
 
 def probe_duration_seconds(media_path: Path) -> float:

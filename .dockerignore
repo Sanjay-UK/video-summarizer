@@ -1,0 +1,20 @@
+# Keep secrets, credentials, and local runtime data out of the Docker build context.
+# The worker image only needs the paths copied in runpod_worker/Dockerfile.
+.env
+.env.*
+aws-video-summarizer_accessKeys.csv
+
+# Local runtime state and generated output
+output/
+downloads/
+data/
+transcripts/
+
+# Local environments and tooling
+venv/
+venv-*/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.DS_Store

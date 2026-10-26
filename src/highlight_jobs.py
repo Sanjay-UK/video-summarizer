@@ -55,23 +55,48 @@ def merge_language_status(
     write_highlight_status(job_dir, data)
 
 
+def attempted_highlight_languages(job_dir: Path) -> list[str]:
+    """Languages the user asked for, plus any language that has a status record (it was attempted).
+
+    Requested languages come from the saved list. A file written before that list existed has no key, so only
+    languages with a record count, and nothing is assumed about the rest. Languages that were never requested are
+    left out entirely.
+    """
+    data = read_highlight_status(job_dir)
+    statuses = data.get("languages") or {}
+    ordered: list[str] = []
+    if "requested_languages" in data:
+        ordered.extend(str(code).strip().lower() for code in (data.get("requested_languages") or []))
+    ordered.extend(str(code).strip().lower() for code in statuses.keys())
+    seen: set[str] = set()
+    return [c for c in ordered if c and not (c in seen or seen.add(c))]
+
+
 def list_highlight_language_status(job_dir: Path) -> list[dict[str, Any]]:
-    """UI/API view: every requested language with success or failure reason."""
+    """UI/API view of the requested highlight languages.
+
+    Each row is one of: success (a file exists), failed (attempted and failed, with the reason), or not_generated
+    (requested but no record and no file). Languages that were not requested have no row.
+    """
     job_dir = Path(job_dir)
     data = read_highlight_status(job_dir)
-    requested = data.get("requested_languages") or list(data.get("languages", {}).keys())
-    statuses = data.get("languages", {})
+    statuses = data.get("languages", {}) or {}
     out: list[dict[str, Any]] = []
 
-    for code in requested:
+    for code in attempted_highlight_languages(job_dir):
         spec = LOCALES.get(code)
         name = spec.name if spec else code
-        entry = statuses.get(code, {})
+        entry = statuses.get(code, {}) or {}
         mp4 = highlight_file_for_lang(job_dir, code)
         has_file = mp4.is_file()
-        status = entry.get("status") or ("success" if has_file else "unknown")
-        if has_file and status != "success":
+        if has_file:
             status = "success"
+        elif entry.get("status") == "failed":
+            status = "failed"
+        elif entry.get("status") == "success":
+            status = "failed"  # a success record with no file is not a usable highlight
+        else:
+            status = "not_generated"
         row: dict[str, Any] = {
             "code": code,
             "name": name,
