@@ -237,6 +237,7 @@ function applyResultsLanguageView() {
  const playerWrap = document.getElementById('highlightPlayerWrap');
  const player = document.getElementById('highlightVideoPlayer');
  const dlBtn = document.getElementById('highlightDownloadBtn');
+ const copyBtn = document.getElementById('highlightCopyLinkBtn');
  const row = (results.highlight_language_status || []).find((r) => r.code === code);
  const hasHighlight = row?.status === 'success' && row.download_available;
  if (playerWrap && player) {
@@ -244,15 +245,18 @@ function applyResultsLanguageView() {
  playerWrap.style.display = 'block';
  bindHighlightSource(player, player, currentJobId, code);
  if (dlBtn) dlBtn.style.display = 'inline-block';
+ if (copyBtn) copyBtn.style.display = 'inline-block';
  } else if (results.highlight_video) {
  playerWrap.style.display = 'block';
  unbindHighlightSource(player);
  player.removeAttribute('src');
  if (dlBtn) dlBtn.style.display = 'none';
+ if (copyBtn) copyBtn.style.display = 'none';
  } else {
  playerWrap.style.display = 'none';
  unbindHighlightSource(player);
  if (dlBtn) dlBtn.style.display = 'none';
+ if (copyBtn) copyBtn.style.display = 'none';
  }
  }
 }
@@ -870,6 +874,12 @@ function downloadHighlightForResultsLang() {
  downloadHighlightLang(selectedResultsLang);
 }
 
+/** Copy link for the highlight language currently selected on the results page. */
+function copyHighlightLinkForResultsLang(event) {
+ if (!currentJobId || !selectedResultsLang) return;
+ copyHighlightLink(event, currentJobId, selectedResultsLang);
+}
+
 function downloadHighlightLang(langCode) {
  if (!currentJobId || !langCode) return;
  fetchHighlightUrl(currentJobId, langCode, true)
@@ -921,11 +931,34 @@ function loadHistory() {
  ${job.completed_at ? `<span> ${formatDuration(job.created_at, job.completed_at)}</span>` : ''}
  </div>
  ${extras.length ? `<div class="history-item-meta" style="margin-top: 6px; font-size: 12px; color: #666;">${extras.map((e) => escapeHtml(e)).join(' · ')}</div>` : ''}
+ ${(job.highlights || []).map((h) => `<button class="history-copy-link" onclick="copyHighlightLink(event, '${escapeHtml(job.job_id)}', '${escapeHtml(h.code)}')">Copy link (${escapeHtml(h.code.toUpperCase())})</button>`).join('')}
  </div>
  `;
  }).join('');
  })
  .catch(e => console.error('[HISTORY ERROR]', e));
+}
+
+/** Copies a fresh one-hour S3 link to a highlight. The click must not open the job, so it stops the event here. */
+async function copyHighlightLink(event, jobId, code) {
+ event.stopPropagation();
+ const button = event.currentTarget;
+ const label = button.textContent;
+ button.disabled = true;
+ try {
+ const response = await fetch(`/api/highlight-url/${jobId}/${code}`, { cache: 'no-store' });
+ const body = await response.json().catch(() => ({}));
+ if (!response.ok || !body.url) {
+ alert(body.error || `Could not create a link (HTTP ${response.status}).`);
+ return;
+ }
+ await navigator.clipboard.writeText(body.url);
+ button.textContent = 'Copied';
+ } catch (err) {
+ alert('Could not copy the link. Check that the page is open on localhost.');
+ } finally {
+ setTimeout(() => { button.textContent = label; button.disabled = false; }, 2000);
+ }
 }
 
 function truncate(str, len) {

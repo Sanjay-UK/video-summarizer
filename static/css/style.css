@@ -1189,6 +1189,27 @@ main {
     gap: 15px;
 }
 
+.history-copy-link {
+    margin-top: 6px;
+    margin-right: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: #667eea;
+    background: white;
+    border: 1px solid #c7d2fe;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.history-copy-link:hover:not(:disabled) {
+    background: #eef2ff;
+}
+
+.history-copy-link:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
 .history-item-id {
     font-family: 'SF Mono', Monaco, monospace;
     color: #aaa;
