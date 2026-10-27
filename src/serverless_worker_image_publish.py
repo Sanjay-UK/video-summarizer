@@ -13,9 +13,9 @@ from typing import Any, Callable
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = PROJECT_DIR / ".env"
 DOCKERFILE = PROJECT_DIR / "runpod_worker" / "Dockerfile"
-LOCAL_TAG = "video-summarizer-worker:v1.0.11"
+LOCAL_TAG = "video-summarizer-worker:v1.0.12"
 DEFAULT_IMAGE_NAME = "video-summarizer-worker"
-DEFAULT_IMAGE_TAG = "v1.0.11"
+DEFAULT_IMAGE_TAG = "v1.0.12"
 
 LogFn = Callable[[str], None]
 
