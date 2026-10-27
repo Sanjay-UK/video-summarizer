@@ -50,6 +50,13 @@ SHORT_TRANSCRIPT = (
 )
 
 
+def _always(text):
+    """A patcher for ollama.Client whose generate() gives the same reply every time."""
+    client = mock.MagicMock()
+    client.generate.return_value = {"response": text}
+    return mock.patch("src.summarizer.ollama.Client", return_value=client), client
+
+
 def _mock_client(*responses):
     """Return a patcher for ollama.Client whose generate() yields the given response texts in order."""
     client = mock.MagicMock()
@@ -124,18 +131,20 @@ class ExtractAndRankConceptsTests(unittest.TestCase):
         self.assertTrue(lines[0].startswith("[CRITICAL][chunk:2] Sushi making"))
         self.assertTrue(all(line.startswith("[") for line in lines))
 
-    def test_empty_model_response_raises(self):
-        patcher, _ = _mock_client("")
-        with patcher, self.assertRaises(RuntimeError) as ctx:
-            extract_and_rank_concepts(SHORT_TRANSCRIPT, model="llama3.2:3b")
-        self.assertIn("Empty response", str(ctx.exception))
+    def test_empty_model_response_falls_back_to_the_transcript_sentences(self):
+        patcher, _ = _always("")
+        with patcher:
+            out = extract_and_rank_concepts(SHORT_TRANSCRIPT, model="llama3.2:3b", chunk_index=0)
+        lines = out.split("\n")
+        self.assertTrue(lines and all(line.startswith("[IMPORTANT][chunk:0] ") for line in lines))
+        self.assertIn(lines[0].split("] ", 1)[1].split(".")[0], SHORT_TRANSCRIPT)
 
-    def test_unparseable_model_response_raises_after_one_retry(self):
-        patcher, client = _mock_client("I cannot help with that request.", "Still no tags here.")
-        with patcher, self.assertRaises(RuntimeError) as ctx:
-            extract_and_rank_concepts(SHORT_TRANSCRIPT, model="llama3.2:3b")
-        self.assertIn("No ranked concepts", str(ctx.exception))
-        self.assertEqual(client.generate.call_count, 2)
+    def test_unparseable_model_response_falls_back_after_the_retry(self):
+        patcher, client = _always("Still no tags here.")
+        with patcher:
+            out = extract_and_rank_concepts(SHORT_TRANSCRIPT, model="llama3.2:3b", chunk_index=1)
+        self.assertTrue(out.startswith("[IMPORTANT][chunk:1] "))
+        self.assertGreaterEqual(client.generate.call_count, 2, "the format-reminder retry must still happen")
 
     def test_retry_recovers_when_second_attempt_is_formatted(self):
         patcher, client = _mock_client("I'm ready. Please paste the transcript.", REAL_SHORT_CLIP_OUTPUT)
@@ -146,11 +155,12 @@ class ExtractAndRankConceptsTests(unittest.TestCase):
         second_prompt = client.generate.call_args_list[1].kwargs["prompt"]
         self.assertIn("Reply ONLY with lines", second_prompt)
 
-    def test_empty_response_is_not_retried(self):
-        patcher, client = _mock_client("", REAL_SHORT_CLIP_OUTPUT)
-        with patcher, self.assertRaises(RuntimeError):
+    def test_empty_response_is_not_retried_with_a_format_reminder(self):
+        patcher, client = _always("")
+        with patcher:
             extract_and_rank_concepts(SHORT_TRANSCRIPT, model="llama3.2:3b")
-        self.assertEqual(client.generate.call_count, 1)
+        prompts = [c.kwargs["prompt"] for c in client.generate.call_args_list]
+        self.assertFalse(any("Reply ONLY with lines" in p for p in prompts))
 
 
 class SelectionCompatibilityTests(unittest.TestCase):
@@ -191,36 +201,41 @@ class SummarizeTranscriptGuardTests(unittest.TestCase):
         self.assertTrue(written.strip())
         self.assertGreater(meta["summary_length"], 0)
 
-    def test_empty_model_output_fails_and_writes_no_summary(self):
-        patcher, _ = _mock_client("", "")
+    def test_empty_model_output_still_writes_a_summary_from_the_transcript(self):
+        patcher, _ = _always("")
         with tempfile.TemporaryDirectory() as tmp_str, patcher:
             tmp = Path(tmp_str)
             transcript, segments = self._write_inputs(tmp, SHORT_TRANSCRIPT)
-            with self.assertRaises(RuntimeError):
-                summarize_transcript(
-                    transcript_path=transcript,
-                    segments_path=segments,
-                    output_dir=tmp,
-                    model="llama3.2:3b",
-                    compression="medium",
-                )
-            self.assertFalse((tmp / "summary.txt").exists(), "an empty summary must not be written")
+            summarize_transcript(
+                transcript_path=transcript,
+                segments_path=segments,
+                output_dir=tmp,
+                model="llama3.2:3b",
+                compression="medium",
+            )
+            written = (tmp / "summary.txt").read_text(encoding="utf-8")
+            notes = json.loads((tmp / "summary_metadata.json").read_text(encoding="utf-8"))["summary_notes"]
+        self.assertTrue(written.strip(), "the job must end with a summary")
+        self.assertFalse(notes["ai_summary_complete"])
+        self.assertGreaterEqual(notes["fallback_chunks"], 1)
 
-    def test_unparseable_concepts_fail_the_job(self):
-        patcher, _ = _mock_client("Sorry, I can't do that.", "Still sorry.")
+    def test_refused_concepts_still_produce_a_summary_and_say_so(self):
+        patcher, _ = _always("Sorry, I can't do that.")
         with tempfile.TemporaryDirectory() as tmp_str, patcher:
             tmp = Path(tmp_str)
             transcript, segments = self._write_inputs(tmp, SHORT_TRANSCRIPT)
-            with self.assertRaises(RuntimeError) as ctx:
-                summarize_transcript(
-                    transcript_path=transcript,
-                    segments_path=segments,
-                    output_dir=tmp,
-                    model="llama3.2:3b",
-                    compression="medium",
-                )
-            self.assertIn("no ranked concepts", str(ctx.exception).lower())
-            self.assertFalse((tmp / "summary.txt").exists())
+            summarize_transcript(
+                transcript_path=transcript,
+                segments_path=segments,
+                output_dir=tmp,
+                model="llama3.2:3b",
+                compression="medium",
+            )
+            written = (tmp / "summary.txt").read_text(encoding="utf-8")
+            notes = json.loads((tmp / "summary_metadata.json").read_text(encoding="utf-8"))["summary_notes"]
+        self.assertTrue(written.strip())
+        self.assertNotIn("sorry", written.lower())
+        self.assertFalse(notes["ai_summary_complete"])
 
 
 if __name__ == "__main__":

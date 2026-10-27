@@ -786,6 +786,14 @@ def _source_url_for_worker(job, store) -> str | None:
     return store.presign_get(entry["key"], expires=s3.HIGHLIGHT_URL_EXPIRES, content_type=entry["content_type"])
 
 
+def _read_json_or_empty(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _results_payload(job_dir: Path, transcript_length: int) -> dict:
     """The results shown on the results page, built from a job folder. Saved to S3 as part of the manifest."""
     summary_path = job_dir / "summary.txt"
@@ -795,6 +803,8 @@ def _results_payload(job_dir: Path, transcript_length: int) -> dict:
     summary_i18n = summary_translations_for_api(job_dir)
     return {
         "status": "completed",
+        "summary_notes": _read_json_or_empty(job_dir / "summary_metadata.json").get("summary_notes") or {},
+        "transcript_notes": _read_json_or_empty(job_dir / "transcript_notes.json"),
         "summary": summary_text,
         "transcript_length": transcript_length,
         "summary_length": len(summary_text),

@@ -9,6 +9,7 @@ from typing import Optional
 
 from config import HIGHLIGHT_NARRATION_MAX_WORDS, OLLAMA_HOST, SUMMARIZATION_MODEL
 from src.highlight_llm import highlight_ollama_options
+from src.summary_guard import is_refusal
 
 try:
     import ollama
@@ -109,6 +110,8 @@ def _enforce_word_limit(text: str, max_words: int, model: str, topic_title: str)
     prompt = _build_rewrite_prompt("", topic_title, max_words, shorten=True, current_text=text)
     try:
         shortened = _call_ollama(prompt, model)
+        if is_refusal(shortened):
+            shortened = ""
         if shortened and count_words(shortened) <= max_words:
             return shortened
         if shortened:
@@ -146,6 +149,10 @@ def rewrite_for_speech(
         text = _call_ollama(prompt, model)
     except Exception as exc:
         print(f"[WARN] Narration rewrite failed: {safe_exc(exc)}", file=sys.stderr)
+        text = ""
+    if is_refusal(text):
+        # A refusal is not narration. It must never be spoken in the highlight video.
+        print("[WARN] Narration rewrite refused; using trimmed summary", file=sys.stderr)
         text = ""
 
     if not text:

@@ -208,12 +208,35 @@ function summaryTextForLang(results, code) {
  return results.summary || '';
 }
 
+/** Plain-language notes for what the pipeline had to skip or work around. Hidden when nothing was skipped. */
+function renderResultsNotice(results) {
+ const el = document.getElementById('resultsNotice');
+ if (!el) return;
+ const messages = [];
+ const transcript = results.transcript_notes || {};
+ const summary = results.summary_notes || {};
+ if (transcript.low_confidence) {
+ messages.push('The speech in this video was hard to transcribe reliably, so parts of this summary may be inaccurate.');
+ }
+ if (summary.ai_summary_complete === false) {
+ messages.push('Part of this summary was taken from the transcript itself, because the AI summary was not available for that part.');
+ }
+ if (summary.skipped_sentences > 0) {
+ const n = summary.skipped_sentences;
+ messages.push(`${n} sentence${n === 1 ? ' was' : 's were'} left out of the AI summary because the model would not process ${n === 1 ? 'it' : 'them'}.`);
+ }
+ el.textContent = messages.join(' ');
+ el.style.display = messages.length ? 'block' : 'none';
+}
+
 function applyResultsLanguageView() {
  if (!cachedResults || !currentJobId) {
  return;
  }
  const code = selectedResultsLang;
  const results = cachedResults;
+
+ renderResultsNotice(results);
 
  renderMarkdownInto(
  document.getElementById('summaryContentDisplay'),

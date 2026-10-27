@@ -525,6 +525,8 @@ def _write_artifacts_from_output(job_output_dir: Path, output: Any) -> None:
         "summary_segments_json": "summary_segments.json",
         "summary_translations_json": "summary_translations.json",
         "heavy_done_json": "heavy_done.json",
+        "summary_metadata_json": "summary_metadata.json",
+        "transcript_notes_json": "transcript_notes.json",
     }
     for key, filename in mapping.items():
         if key not in output:

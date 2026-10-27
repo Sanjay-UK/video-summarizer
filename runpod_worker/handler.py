@@ -83,6 +83,12 @@ def _heavy_phase(inp: dict[str, Any]) -> dict[str, Any]:
         }
         if st_path.is_file():
             out["summary_translations_json"] = st_path.read_text(encoding="utf-8")
+        # What was skipped or fell back, and how reliable the transcript is. Shown on the results page.
+        for notes_name, out_key in (("summary_metadata.json", "summary_metadata_json"),
+                                    ("transcript_notes.json", "transcript_notes_json")):
+            notes_path = workdir / notes_name
+            if notes_path.is_file():
+                out[out_key] = notes_path.read_text(encoding="utf-8")
         # Subtitles and the summary timeline need this file; the summarizer writes it on the worker.
         seg_path = workdir / "summary_segments.json"
         if seg_path.is_file():

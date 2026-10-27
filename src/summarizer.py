@@ -1,6 +1,7 @@
 """Summarize transcripts using Ollama/Llama with intelligent prompt engineering."""
 
 from src.log_safety import safe_exc, safe_traceback
+from src.summary_guard import extractive_sentences, extractive_text, is_refusal, resolve_with_skips
 import json
 import re
 import sys
@@ -144,22 +145,9 @@ def parse_ranked_concepts(raw: str) -> list:
     return concepts
 
 
-def extract_and_rank_concepts(transcript: str, model: str = None, chunk_index: int = 0) -> str:
-    """Extract and rank all concepts by importance using two-pass approach.
-
-    Pass 1: Identify all unique concepts/topics and rank them by importance.
-
-    Args:
-        chunk_index: Index of the source chunk this transcript came from. Tagged onto
-            each returned concept line so concepts from multiple chunks can be safely
-            aggregated, globally selected, then routed back to their originating chunk.
-
-    Returns:
-        Structured list of concepts with importance ranking and chunk tag
-        Format: [CRITICAL][chunk:0] Concept 1: explanation
-                [IMPORTANT][chunk:0] Concept 2: explanation
-                [SUPPORTING][chunk:0] Concept 3: explanation
-    """
+def _ask_concepts(transcript: str, model: str = None):
+    """Ask the model for ranked concepts. Returns (priority, text) pairs, or None when the model refused or gave
+    nothing usable. Connection and timeout errors still raise: the caller decides what to do with them."""
     if model is None:
         model = SUMMARIZATION_MODEL
 
@@ -217,26 +205,50 @@ RANKED CONCEPTS:
 
             concepts = response.get("response", "").strip()
 
-            if not concepts:
-                raise RuntimeError("Empty response from Ollama")
+            if is_refusal(concepts):
+                # A refusal or an empty reply. Retrying the same text with a format reminder will not help.
+                print(f"[WARN] Model refused or returned nothing for this text: {concepts[:80]!r}")
+                return None
 
             ranked = parse_ranked_concepts(concepts)
             if ranked:
                 break
             print(f"[WARN] No ranked concepts in attempt; retrying once with format reminder")
 
-        if not ranked:
-            # Fail loudly: an unparsed response must not turn into an empty summary.
-            raise RuntimeError(f"No ranked concepts found in model output: {concepts[:200]!r}")
-
-        # Tag each concept line with its source chunk index so concepts from multiple
-        # chunks can be aggregated, globally selected, then split back per chunk.
-        # Output format: "[CRITICAL][chunk:0] Concept: explanation"
-        return '\n'.join(f"[{priority}][chunk:{chunk_index}] {text}" for priority, text in ranked)
+        return ranked or None
 
     except Exception as e:
         print(f"[ERROR] Concept extraction failed: {safe_exc(e)}")
         raise
+
+
+def _fallback_concept_lines(transcript: str, chunk_index: int) -> str:
+    """Concept lines taken from the transcript's own sentences. Used when the model gives nothing usable."""
+    sentences = extractive_sentences(transcript, target_chars=600)[:8]
+    return '\n'.join(f"[IMPORTANT][chunk:{chunk_index}] {sentence}" for sentence in sentences)
+
+
+def extract_chunk_concepts(transcript: str, model: str = None, chunk_index: int = 0):
+    """Ranked concept lines for one chunk, tagged with the chunk index so they can be selected globally and routed back.
+
+    Refused sentences are skipped and counted. If the model still gives nothing, the chunk's own sentences are used.
+    Returns (lines, {"skipped": n, "fallback": bool}).
+    """
+    if model is None:
+        model = SUMMARIZATION_MODEL
+    print(f"[INFO] Extracting and ranking concepts with {model}...")
+    ranked, skipped = resolve_with_skips(transcript, lambda piece: _ask_concepts(piece, model) or None)
+    if ranked is None:
+        print(f"[WARN] Chunk {chunk_index + 1}: no usable concepts from the model; using the transcript's own sentences")
+        return _fallback_concept_lines(transcript, chunk_index), {"skipped": len(skipped), "fallback": True}
+    # Output format: "[CRITICAL][chunk:0] Concept: explanation"
+    lines = '\n'.join(f"[{priority}][chunk:{chunk_index}] {text}" for priority, text in ranked)
+    return lines, {"skipped": len(skipped), "fallback": False}
+
+
+def extract_and_rank_concepts(transcript: str, model: str = None, chunk_index: int = 0) -> str:
+    """Ranked concept lines for one chunk (see extract_chunk_concepts)."""
+    return extract_chunk_concepts(transcript, model=model, chunk_index=chunk_index)[0]
 
 
 def select_concepts_by_compression(concepts_text: str, compression: str = "medium") -> str:
@@ -440,13 +452,8 @@ SUMMARY (Remember: target approximately {target_words} words):
 """
 
 
-def summarize_with_ollama(text: str, model: str = None, compression: str = "medium", selected_concepts: str = None) -> str:
-    """Summarize text using Ollama/Llama.
-
-    Args:
-        compression: "high", "medium", or "low" compression level
-        selected_concepts: Pre-selected ranked concepts (from extract_and_rank_concepts)
-    """
+def _ask_summary(text: str, model: str = None, compression: str = "medium", selected_concepts: str = None):
+    """Ask the model for a summary. Returns the summary text, or None when the model refused or gave nothing usable."""
 
     if model is None:
         model = SUMMARIZATION_MODEL
@@ -471,14 +478,28 @@ def summarize_with_ollama(text: str, model: str = None, compression: str = "medi
 
         summary = response.get("response", "").strip()
 
-        if not summary:
-            raise RuntimeError("Empty response from Ollama")
+        if is_refusal(summary):
+            print(f"[WARN] Model refused or returned nothing for this text: {summary[:80]!r}")
+            return None
 
         return summary
 
     except Exception as e:
         print(f"[ERROR] Ollama summarization failed: {safe_exc(e)}")
         raise
+
+
+def summarize_with_ollama(text: str, model: str = None, compression: str = "medium", selected_concepts: str = None) -> str:
+    """Summarize text using Ollama/Llama. Raises if the model gives no usable summary.
+
+    Args:
+        compression: "high", "medium", or "low" compression level
+        selected_concepts: Pre-selected ranked concepts (from extract_and_rank_concepts)
+    """
+    summary = _ask_summary(text, model=model, compression=compression, selected_concepts=selected_concepts)
+    if summary is None:
+        raise RuntimeError("The model gave no usable summary for this text.")
+    return summary
 
 
 def link_summary_to_segments(summary: str, segments: list):
@@ -574,9 +595,14 @@ def summarize_transcript(
     segments = load_segments(segments_path)
     
     print(f"[INFO] Transcript length: {len(transcript)} characters")
-    
+    if not transcript.strip():
+        raise RuntimeError("No speech was detected in this video, so there is nothing to summarize.")
+
     chunks = chunk_text(transcript, max_tokens=2500)
     print(f"[INFO] Split into {len(chunks)} chunks")
+
+    # Counts for the results page. Nothing here stops the job: the output always has text.
+    notes = {"skipped_sentences": 0, "fallback_chunks": 0, "llm_errors": 0}
 
     # PASS 1: Extract and rank concepts from EVERY chunk first, tagging each concept
     # with its source chunk so compression can be applied globally (not per-chunk),
@@ -586,14 +612,22 @@ def summarize_transcript(
     for i, chunk in enumerate(chunks):
         print(f"[INFO]   Extracting concepts from chunk {i+1}/{len(chunks)}...")
         try:
-            chunk_concepts = extract_and_rank_concepts(chunk, model=model, chunk_index=i)
-            all_concepts.append(chunk_concepts)
+            chunk_lines, chunk_notes = extract_chunk_concepts(chunk, model=model, chunk_index=i)
         except Exception as e:
-            print(f"[WARN] Concept extraction failed for chunk {i+1}: {safe_exc(e)}")
+            print(f"[WARN] Concept extraction failed for chunk {i+1}, using the transcript's own sentences: {safe_exc(e)}")
+            notes["llm_errors"] += 1
+            notes["fallback_chunks"] += 1
+            chunk_lines = _fallback_concept_lines(chunk, i)
+        else:
+            notes["skipped_sentences"] += chunk_notes["skipped"]
+            if chunk_notes["fallback"]:
+                notes["fallback_chunks"] += 1
+        all_concepts.append(chunk_lines)
 
     aggregated_concepts = '\n'.join(all_concepts)
     if not any(line.startswith('[') for line in aggregated_concepts.split('\n')):
-        raise RuntimeError("Concept extraction produced no ranked concepts for any chunk; no summary written.")
+        # Only possible when the transcript has no sentences at all, which the check above already rules out.
+        aggregated_concepts = _fallback_concept_lines(transcript, 0)
 
     # PASS 2: Select concepts ONCE globally, based on compression level.
     print(f"[INFO] Pass 2: Selecting concepts globally ({compression} compression)...")
@@ -607,30 +641,36 @@ def summarize_transcript(
     summaries = []
     for i, chunk in enumerate(chunks):
         print(f"[INFO]   Summarizing chunk {i+1}/{len(chunks)}...")
+        chunk_selected = selected_by_chunk[i]
+        if not chunk_selected.strip():
+            # No concepts from this chunk survived global selection; skip it
+            # rather than summarizing without any concept guidance.
+            print(f"[INFO]   Chunk {i+1} contributed no selected concepts, skipping")
+            continue
+        chunk_summary = None
         try:
-            chunk_selected = selected_by_chunk[i]
-            if not chunk_selected.strip():
-                # No concepts from this chunk survived global selection; skip it
-                # rather than summarizing without any concept guidance.
-                print(f"[INFO]   Chunk {i+1} contributed no selected concepts, skipping")
-                continue
-            chunk_summary = summarize_with_ollama(
+            chunk_summary, skipped = resolve_with_skips(
                 chunk,
-                model=model,
-                compression=compression,
-                selected_concepts=chunk_selected
+                lambda piece, selected=chunk_selected: _ask_summary(
+                    piece, model=model, compression=compression, selected_concepts=selected
+                ),
             )
-            summaries.append(chunk_summary)
+            notes["skipped_sentences"] += len(skipped)
         except Exception as e:
-            print(f"[WARN] Chunk {i+1} summarization failed: {safe_exc(e)}")
+            print(f"[WARN] Chunk {i+1} summary request failed, using the transcript's own sentences: {safe_exc(e)}")
+            notes["llm_errors"] += 1
+        if not chunk_summary:
+            chunk_summary = extractive_text(chunk, target_chars=int(len(chunk) * SUMMARY_RATIO))
+            notes["fallback_chunks"] += 1
+        summaries.append(chunk_summary)
 
     # Concatenate the already concept-selected chunk summaries directly.
     # No second LLM re-summarization pass here — that previously re-compressed
     # already-selected content and silently dropped topics.
-    full_summary = "\n\n".join(summaries)
-    if not full_summary.strip():
-        # Never write an empty summary.txt that the job runner would report as completed.
-        raise RuntimeError("Summarization produced an empty summary; no outputs written.")
+    full_summary = "\n\n".join(summaries).strip()
+    if not full_summary:
+        full_summary = extractive_text(transcript, target_chars=int(len(transcript) * SUMMARY_RATIO))
+        notes["fallback_chunks"] += 1
 
     print(f"[INFO] Linking summary to video timestamps...")
     linked_segments = link_summary_to_segments(full_summary, segments)
@@ -661,6 +701,12 @@ def summarize_transcript(
         "temperature": SUMMARY_TEMPERATURE,
         "num_chunks": len(chunks),
         "num_segments": len(linked_segments),
+        "summary_notes": {
+            "ai_summary_complete": notes["fallback_chunks"] == 0 and notes["llm_errors"] == 0,
+            "skipped_sentences": notes["skipped_sentences"],
+            "fallback_chunks": notes["fallback_chunks"],
+            "llm_errors": notes["llm_errors"],
+        },
     }
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)

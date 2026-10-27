@@ -7,6 +7,9 @@ import sys
 from pathlib import Path
 from config import OUTPUT_DIR, SUBTITLE_GEN_DIR, WHISPER_DEVICE, WHISPER_MODEL
 
+# Whisper's average log-probability per segment. Below this the text is mostly guesses (faster-whisper's own threshold).
+LOW_CONFIDENCE_LOGPROB = -1.0
+
 sys.path.insert(0, str(SUBTITLE_GEN_DIR))
 
 try:
@@ -116,17 +119,23 @@ def transcribe_audio(audio_path, model=None, output_dir=None, device=None):
         initial_prompt = ""
     
     print("[INFO] Pass 1: Transcribing...")
+    # Language is detected, not forced. Forcing "en" made non-English speech come out as invented English.
     segments, info = whisper_model.transcribe(
         str(audio_path),
-        language="en",
+        language=None,
         condition_on_previous_text=False,
         initial_prompt=initial_prompt if initial_prompt else None,
     )
     
     total_seconds = float(getattr(info, "duration", 0) or 0)
     collected = []
+    logprobs = []
     for seg in segments:
         collected.append({"start": seg.start, "end": seg.end, "text": seg.text})
+        # Confidence is a report, not a requirement: a missing value must never stop the transcript.
+        avg_logprob = getattr(seg, "avg_logprob", None)
+        if avg_logprob is not None:
+            logprobs.append(float(avg_logprob))
         if total_seconds > 0:
             # Measured: audio seconds transcribed so far, out of the audio duration.
             report_progress(min(float(seg.end) / total_seconds, 1.0))
@@ -148,6 +157,17 @@ def transcribe_audio(audio_path, model=None, output_dir=None, device=None):
     with open(transcript_path, "w", encoding="utf-8") as f:
         f.write(full_text)
     print(f"[DONE] Saved: {transcript_path}")
+
+    # How reliable the transcript is. Shown on the results page; it never stops the job.
+    mean_logprob = sum(logprobs) / len(logprobs) if logprobs else None
+    notes = {
+        "language": getattr(info, "language", None),
+        "language_probability": round(float(getattr(info, "language_probability", 0) or 0), 3),
+        "mean_logprob": None if mean_logprob is None else round(mean_logprob, 3),
+        "low_confidence": mean_logprob is None or mean_logprob < LOW_CONFIDENCE_LOGPROB,
+    }
+    (output_dir / "transcript_notes.json").write_text(json.dumps(notes, indent=2), encoding="utf-8")
+    print(f"[INFO] Transcript language: {notes['language']}, low confidence: {notes['low_confidence']}")
     
     segments_path = output_dir / "segments.json"
     with open(segments_path, "w", encoding="utf-8") as f:
