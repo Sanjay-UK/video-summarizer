@@ -237,7 +237,7 @@ class CallSiteTests(unittest.TestCase):
         from src import endpoint_capacity as ec
 
         messages = []
-        with mock.patch.object(ec, "_paths", side_effect=RuntimeError(f"cannot open {SIGNED} with {TOKEN}")):
+        with mock.patch.object(ec, "_store", side_effect=RuntimeError(f"cannot open {SIGNED} with {TOKEN}")):
             ec.release_lease("EP1", "tok", messages.append)
         self.assertTrue(messages, "the warning is still written")
         self.assertIn("RuntimeError", messages[0])

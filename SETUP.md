@@ -247,7 +247,8 @@ The app keeps the RunPod serverless endpoint at `max_workers=0` whenever it has 
   deploy is reported as failed.
 
 **Limitations:**
-- Coordination covers **one machine** that shares this project folder. Two machines using the same endpoint
-  cannot see each other's leases, and this is not supported.
+- Leases are kept in the project S3 bucket, so **every machine that uses the same endpoint shares them**. Each
+  machine must run this code. An older copy still lowers capacity from its local files and can cut off a job on
+  the other machine. Machines must agree on the clock to within a few seconds.
 - Jobs started **outside this app** (RunPod console, other tools) hold no lease and are not tracked.
 - If the app crashes mid-job, capacity stays up until the next app start or the lease expires.

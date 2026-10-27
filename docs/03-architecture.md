@@ -108,7 +108,7 @@ reasoning is marked as an inference.
 - **Decision:** the endpoint stays at zero workers unless a lease is held; leases are released when the last job ends
   (`src/endpoint_capacity.py:3-4`).
 - **Why:** an idle GPU worker is billed. Stated in the module docstring.
-- **Trade-off:** one machine only; leases expire after four hours (`src/endpoint_capacity.py:37`), and jobs running longer
+- **Trade-off:** leases live in S3 and are shared by all machines (`src/endpoint_capacity.py`); leases expire after four hours (`src/endpoint_capacity.py:37`), and jobs running longer
   lose their lease (`src/endpoint_capacity.py:13-17`).
 
 ### D8. No automatic retry on gateway errors
