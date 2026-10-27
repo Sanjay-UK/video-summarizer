@@ -135,9 +135,9 @@ def _category_definitions() -> list[RecommendationCategory]:
         ),
         RecommendationCategory(
             id="runpod_community",
-            title="RunPod Community (cheapest cloud GPU)",
+            title="Community cloud (cheapest GPU)",
             description=(
-                f"Rules: RunPod Community only, ≥{_PIPELINE_VRAM_FLOOR_GB} GB VRAM, lowest $/hr."
+                f"Rules: community cloud only, ≥{_PIPELINE_VRAM_FLOOR_GB} GB VRAM, lowest $/hr."
             ),
             kind="gpu",
             picker=_pick_runpod_community_value,

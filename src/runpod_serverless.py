@@ -5,6 +5,7 @@ from src.log_safety import redact
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -411,6 +412,22 @@ def _inference_request(
         return exc.code, detail
 
 
+_HTML_TITLE = re.compile(r"<title>\s*(.*?)\s*</title>", re.IGNORECASE | re.DOTALL)
+
+
+def _gateway_error_text(status: int, detail: Any) -> str:
+    """A short description for an HTML error page from a proxy (for example Cloudflare's 502 page).
+
+    The full HTML is not shown to users. The page title (such as '502 Bad Gateway') is kept.
+    """
+    text = str(detail)
+    if "<html" not in text.lower():
+        return text
+    match = _HTML_TITLE.search(text)
+    title = " ".join(match.group(1).split()) if match else ""
+    return title or f"HTTP {status} from the RunPod gateway"
+
+
 def submit_job(endpoint_id: str, job_input: dict[str, Any]) -> str:
     status, payload = _inference_request(
         "POST",
@@ -424,6 +441,13 @@ def submit_job(endpoint_id: str, job_input: dict[str, Any]) -> str:
         if status == 409 and "paused" in str(detail).lower():
             # Rejected, not accepted: safe to retry without risking a duplicate job.
             raise EndpointPausedError(f"RunPod /run rejected: endpoint paused (HTTP 409): {detail}")
+        if status in (502, 503, 504):
+            # The gateway answered without a job id, so whether RunPod queued the job is not known. It is not
+            # retried automatically, because a second submit could start a second paid GPU job.
+            raise RuntimeError(
+                f"RunPod /run failed (HTTP {status}): {_gateway_error_text(status, detail)}. "
+                "RunPod did not return a job id, so the job may not have started. Retry the highlight."
+            )
         raise RuntimeError(f"RunPod /run failed (HTTP {status}): {detail}")
     job_id = payload.get("id")
     if not job_id:

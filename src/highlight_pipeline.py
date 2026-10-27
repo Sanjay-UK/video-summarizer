@@ -1,6 +1,7 @@
 """End-to-end highlight video pipeline (multi-language, opt-in)."""
 
 from __future__ import annotations
+from src.user_messages import GENERIC_HIGHLIGHT_FAILURE, public_error
 from src.log_safety import redact, safe_exc
 
 import json
@@ -13,11 +14,18 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from config import HIGHLIGHT_RENDER_MAX_PARALLEL_LANGS, HIGHLIGHT_TRANSLATOR
-from src.highlight_assembler import concat_scenes
-from src.highlight_shared_video import ensure_shared_scene_visuals, mux_language_scene, read_scene_timing_manifest
+from src.highlight_assembler import HIGHLIGHT_NARRATION_FILE, concat_scenes, ensure_narration_track
+from src.highlight_shared_video import (
+    copy_master_narration,
+    ensure_shared_scene_visuals,
+    load_master_narration,
+    mux_language_scene,
+    read_scene_timing_manifest,
+)
 from src.highlight_ffmpeg import require_ffmpeg_subtitles_filter
 from src.highlight_captions import build_scene_ass
 from src.highlight_jobs import (
+    highlight_file_for_lang,
     merge_language_status,
     read_highlight_status,
     write_highlight_status,
@@ -177,7 +185,10 @@ def _write_lang_failure(
     translation_seconds: float = 0.0,
     translator_backend: str = "",
 ) -> None:
-    message = redact(message)  # persisted to the status file and shown in the UI: never keep secrets
+    raw = redact(message)  # never keep secrets; the raw text stays on the console for debugging
+    print(f"[highlight] {lang} failed: {raw}", file=sys.stderr)
+    # The status file is shown in the UI, so it gets only user-safe text.
+    message = public_error(raw, default=GENERIC_HIGHLIGHT_FAILURE)
     highlight_root = job_output_dir / "highlights" / lang
     highlight_root.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -193,6 +204,24 @@ def _write_lang_failure(
         encoding="utf-8",
     )
     merge_language_status(job_output_dir, lang, payload)
+
+
+def record_unrecorded_highlight_failures(
+    job_output_dir: Path,
+    lang_codes: list[str],
+    message: str,
+    *,
+    failure_kind: str,
+) -> None:
+    """Mark each requested language that has neither a file nor a status record as failed.
+
+    Used when the highlight step ends without reporting on a language, for example when it raises before any language
+    starts. Without a record the language shows as "not generated", with no reason and no retry.
+    """
+    recorded = read_highlight_status(job_output_dir).get("languages") or {}
+    for code in lang_codes:
+        if not highlight_file_for_lang(job_output_dir, code).is_file() and code not in recorded:
+            _write_lang_failure(job_output_dir, code, message, failure_kind=failure_kind)
 
 
 def _render_language_media(
@@ -217,6 +246,10 @@ def _render_language_media(
     tts_start = time.perf_counter()
     scene_videos: list[Path] = []
     narration_manifest: list[dict[str, Any]] = []
+    reused_narration = 0
+    if lang == "en":
+        # A previous English track may be out of date. Remove it so a failed render cannot leave it behind.
+        (highlight_root / HIGHLIGHT_NARRATION_FILE).unlink(missing_ok=True)
 
     for scene, visual, spoken in zip(scenes, visuals, spoken_texts):
         if not spoken:
@@ -230,7 +263,15 @@ def _render_language_media(
         if display_sec is None:
             raise RuntimeError(f"Missing shared timing for scene {visual.scene_index}")
 
-        tts = generate_scene_narration(spoken, scene_dir / "narration.mp3", locale=locale)
+        tts = None
+        if lang == "en":
+            # The timing pass already synthesized this English text. Reuse that audio instead of a second TTS call.
+            master = load_master_narration(job_output_dir, visual.scene_index, spoken)
+            if master is not None:
+                tts = copy_master_narration(master, scene_dir / "narration.mp3")
+                reused_narration += 1
+        if tts is None:
+            tts = generate_scene_narration(spoken, scene_dir / "narration.mp3", locale=locale)
         ass_path = build_scene_ass(
             tts,
             display_sec,
@@ -282,6 +323,10 @@ def _render_language_media(
 
     output_mp4 = highlight_root / f"highlight_{lang}.mp4"
     concat_scenes(scene_videos, output_mp4)
+    if lang == "en":
+        # The English download is the narration from this video, so it has the same length and timing.
+        ensure_narration_track(highlight_root)
+        print(f"[highlight] English narration reused for {reused_narration} of {len(scene_videos)} scenes", file=sys.stderr)
     render_seconds = time.perf_counter() - render_start
 
     total = translation_seconds + tts_seconds + render_seconds
@@ -387,7 +432,8 @@ def run_highlight_pipeline(
                 if not outcome.ok:
                     msg = outcome.message or f"Translation failed for {lang}"
                     if outcome.failure_kind == "rate_limit":
-                        msg = f"Google rate limit — try again later. ({msg})"
+                        print(f"[highlight] {lang} translation rate limited: {msg}", file=sys.stderr)
+                        msg = "The translation service is busy. Please try again later."
                     _write_lang_failure(
                         job_output_dir,
                         lang,

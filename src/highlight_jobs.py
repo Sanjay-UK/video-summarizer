@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.user_messages import GENERIC_HIGHLIGHT_FAILURE, public_error
+
 import json
 from pathlib import Path
 from typing import Any, Optional
@@ -101,7 +103,8 @@ def list_highlight_language_status(job_dir: Path) -> list[dict[str, Any]]:
             "code": code,
             "name": name,
             "status": status,
-            "message": entry.get("message", ""),
+            # Older status files may hold provider wording; the UI only ever receives user-safe text.
+            "message": public_error(entry.get("message"), default=GENERIC_HIGHLIGHT_FAILURE) if entry.get("message") else "",
             "failure_kind": entry.get("failure_kind"),
             "translator": entry.get("translator") or entry.get("translator_backend") or "",
             "translation_seconds": entry.get("translation_seconds"),

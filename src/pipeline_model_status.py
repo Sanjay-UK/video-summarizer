@@ -107,7 +107,7 @@ def get_pipeline_model_status() -> dict[str, Any]:
         "ollama_error": ollama_err,
         "models": models,
         "note": (
-            "RunPod does not expose model load state on the pod API; "
+            "Model load state is not reported; "
             "Ollama/Whisper status here reflects this Flask host unless you run Ollama on the pod and tunnel."
         ),
     }

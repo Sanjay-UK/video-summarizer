@@ -406,11 +406,11 @@ def get_compute_deploy_status(refresh_live: bool = True) -> dict[str, Any]:
         out["runpod_error"] = err
         if "404" in err or "not found" in err.lower():
             mark_saved_deploy_stopped(
-                f"Pod {pod_id} terminated (not found on RunPod).",
+                "The pod is no longer available.",
                 live_status="TERMINATED",
             )
             out["deploy_record_status"] = "stopped"
-            out["deploy_message"] = f"Pod {pod_id} terminated (not found on RunPod)."
+            out["deploy_message"] = "The pod is no longer available."
             out["phase"] = "stopped"
             out["runpod_live_status"] = "TERMINATED"
         out["can_stop"] = False

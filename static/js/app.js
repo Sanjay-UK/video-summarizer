@@ -1,24 +1,28 @@
 // Configuration
 const API_BASE = '/api';
 const PROGRESS_POLL_INTERVAL = 1000; // 1 second
-const SUBTASK_STEPS = {
- 'downloading': 10,
- 'extracting_audio': 25,
- 'transcribing': 65,
- 'summarizing': 85,
- 'generating_audio': 92,
- 'generating_subtitles': 100,
- 'highlight_topics': 94,
- 'highlight_visuals': 97,
- 'highlight_assembly': 99,
- 'highlight_complete': 100
-};
+// Pipeline order of the steps the backend reports. The checklist follows this order, not percentages, so it always
+// agrees with the stage label shown in the status line.
+const SUBTASK_ORDER = [
+ 'downloading',
+ 'extracting_audio',
+ 'transcribing',
+ 'summarizing',
+ 'translating',
+ 'generating_audio',
+ 'generating_subtitles',
+ 'highlight_topics',
+ 'highlight_visuals',
+ 'highlight_assembly',
+ 'highlight_complete'
+];
 
 const SUBTASK_NAMES = {
  'downloading': 'download',
  'extracting_audio': 'audio',
  'transcribing': 'transcribe',
  'summarizing': 'summarize',
+ 'translating': 'summarize',
  'generating_audio': 'audio-gen',
  'generating_subtitles': 'subtitles',
  'highlight_topics': 'highlight',
@@ -27,39 +31,10 @@ const SUBTASK_NAMES = {
  'highlight_complete': 'highlight'
 };
 
+// Furthest SUBTASK_ORDER index shown on the checklist for the current job. Only moves forward.
+let subtaskHighWater = -1;
+
 let highlightRequested = false;
-
-function getPipelineRuntimeValue() {
- const toggle = document.getElementById('pipelineRuntimeToggle');
- return toggle && toggle.checked ? 'runpod' : 'local';
-}
-
-function syncNavbarGpuLinkVisibility() {
- const toggle = document.getElementById('pipelineRuntimeToggle');
- const link = document.getElementById('navbarGpuLink');
- if (!toggle || !link) return;
- if (toggle.checked) {
- link.removeAttribute('hidden');
- link.setAttribute('aria-hidden', 'false');
- } else {
- link.setAttribute('hidden', '');
- link.setAttribute('aria-hidden', 'true');
- }
-}
-
-async function savePipelineRuntimeFromToggle() {
- const runtime = getPipelineRuntimeValue();
- syncNavbarGpuLinkVisibility();
- try {
- await fetch(`${API_BASE}/pipeline-runtime`, {
- method: 'POST',
- headers: { 'Content-Type': 'application/json' },
- body: JSON.stringify({ pipeline_runtime: runtime }),
- });
- } catch (e) {
- console.warn('[APP] pipeline runtime save failed', e);
- }
-}
 
 function toggleHighlightLangPanel() {
  /* Language panel stays visible for summary + optional highlight video. */
@@ -343,15 +318,8 @@ function renderHighlightDownloads(jobId, results) {
  const view = highlightRowView(row);
  const ok = view.ok;
  const label = `${view.symbol} ${escapeHtml(row.name)} (${escapeHtml(row.code)})`;
- const translatorLabel =
- row.translator === 'source' || row.code === 'en'
- ? 'English source'
- : row.translator
- ? row.translator
- : '';
  const detail = ok
  ? [
- translatorLabel ? `Translated with: ${escapeHtml(translatorLabel)}` : '',
  row.translation_seconds != null ? `translate ${row.translation_seconds}s` : '',
  row.tts_seconds != null ? `TTS ${row.tts_seconds}s` : '',
  row.render_seconds != null ? `render ${row.render_seconds}s` : '',
@@ -502,7 +470,7 @@ function initializeDragDrop() {
  });
 }
 
-/** Fixed summarizer model (Ollama on RunPod/local). Change via GPU page serverless settings, not homepage. */
+/** Fixed summarizer model. Changed on the GPU selection page, not on the homepage. */
 const SUMMARIZATION_MODEL = 'llama3.2:3b';
 
 async function startSummarization() {
@@ -545,7 +513,6 @@ async function startSummarization() {
  const formData = new FormData();
  formData.append('model', model);
  formData.append('compression', compression);
- formData.append('pipeline_runtime', getPipelineRuntimeValue());
  getSelectedOutputLanguages().forEach((lang) => {
  formData.append('highlight_languages', lang);
  });
@@ -599,6 +566,7 @@ function resetProgressUI() {
  document.getElementById('progressText').textContent = '0%';
 
  // Reset all subtasks
+ subtaskHighWater = -1;
  Object.keys(SUBTASK_NAMES).forEach(step => {
  const subtaskId = `subtask-${SUBTASK_NAMES[step]}`;
  const subtask = document.getElementById(subtaskId);
@@ -726,17 +694,16 @@ function updateProgressUI(data) {
  fill.classList.add('indeterminate');
  fill.style.width = '40%';
  const elapsed = Number(data.stage_elapsed_sec) || 0;
- const remote = data.progress_source === 'runpod' ? ' (RunPod GPU)' : '';
- document.getElementById('progressText').textContent =
- `${stageLabel(current_step)}${remote} · ${elapsed}s`;
+  document.getElementById('progressText').textContent =
+ `${stageLabel(current_step)} · ${elapsed}s`;
  } else {
  fill.classList.remove('indeterminate');
  fill.style.width = view.percent + '%';
  document.getElementById('progressText').textContent = view.percent + '%';
  }
 
- // Update subtasks based on current step and progress percentage
- updateSubtaskUI(current_step, view.percent);
+ // Update the checklist from the reported step, so it matches the stage label
+ updateSubtaskUI(current_step, status === 'completed');
 
  // Update logs
  if (log_lines && log_lines.length > 0) {
@@ -748,25 +715,45 @@ function updateProgressUI(data) {
  }
 }
 
-// Which subtask to show as active or completed for a displayed percentage. Pure, so it can be tested.
-function subtaskStates(currentStep, displayedPercent) {
+// State of each reported step: completed before the current one, active on it, pending after it. Pure, so it can be
+// tested. An unknown step leaves every step pending; finished marks every step completed.
+function subtaskStates(currentStep, finished) {
+ const current = SUBTASK_ORDER.indexOf(currentStep);
  const states = {};
- for (const step of Object.keys(SUBTASK_STEPS)) {
- if (step === currentStep) states[step] = 'active';
- else if (SUBTASK_STEPS[step] < displayedPercent) states[step] = 'completed';
+ SUBTASK_ORDER.forEach((step, index) => {
+ if (finished || (current >= 0 && index < current)) states[step] = 'completed';
+ else if (index === current) states[step] = 'active';
  else states[step] = 'pending';
- }
+ });
  return states;
 }
 
-function updateSubtaskUI(currentStep, displayedPercent) {
- const states = subtaskStates(currentStep, displayedPercent);
- for (const [step, state] of Object.entries(states)) {
- const subtask = document.getElementById(`subtask-${SUBTASK_NAMES[step]}`);
+// Checklist items group several steps (for example, both summarize steps). An item is active while any of its steps
+// is active, completed once all of its steps are completed, and pending otherwise.
+function subtaskItemStates(states) {
+ const items = {};
+ for (const name of new Set(Object.values(SUBTASK_NAMES))) {
+ const own = Object.keys(states).filter(step => SUBTASK_NAMES[step] === name).map(step => states[step]);
+ if (own.includes('active')) items[name] = 'active';
+ else if (own.length > 0 && own.every(state => state === 'completed')) items[name] = 'completed';
+ else items[name] = 'pending';
+ }
+ return items;
+}
+
+function updateSubtaskUI(currentStep, finished) {
+ // A late or out-of-order report must never move the checklist back, so keep the furthest step seen for this job.
+ subtaskHighWater = Math.max(subtaskHighWater, SUBTASK_ORDER.indexOf(currentStep));
+ const furthest = SUBTASK_ORDER[subtaskHighWater];
+ const items = subtaskItemStates(subtaskStates(furthest, finished));
+ for (const [name, state] of Object.entries(items)) {
+ const subtask = document.getElementById(`subtask-${name}`);
  if (!subtask) continue;
  subtask.classList.toggle('active', state === 'active');
  subtask.classList.toggle('completed', state === 'completed');
  subtask.querySelector('.subtask-checkbox').textContent = '';
+ // The highlight item is hidden until a highlight step is reached, so show it as soon as one is.
+ if (name === 'highlight' && state !== 'pending') subtask.style.display = 'flex';
  }
 }
 
@@ -1038,14 +1025,6 @@ window.addEventListener('load', () => {
  // Set initial button state
  validateInputs();
  toggleHighlightLangPanel();
-
- const runtimeToggle = document.getElementById('pipelineRuntimeToggle');
- if (runtimeToggle) {
- syncNavbarGpuLinkVisibility();
- runtimeToggle.addEventListener('change', () => {
- savePipelineRuntimeFromToggle();
- });
- }
 
  // Refresh history every 5 seconds
  setInterval(loadHistory, 5000);

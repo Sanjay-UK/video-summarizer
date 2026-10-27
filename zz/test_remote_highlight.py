@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("RUNPOD_API_KEY", "")
 
 from src import pipeline_executor  # noqa: E402
+from src.user_messages import GENERIC_HIGHLIGHT_FAILURE  # noqa: E402
 from src.highlight_jobs import highlight_file_for_lang, list_highlight_language_status  # noqa: E402
 
 PATCH_BASE = "src.pipeline_executor.PipelineExecutor.run_highlight_phase"
@@ -71,8 +72,9 @@ class RemoteHighlightFailureTests(unittest.TestCase):
         self.assertEqual(result, {}, "no highlight path may be returned for a failed remote render")
         en = [s for s in statuses if s["code"] == "en"][0]
         self.assertEqual(en["status"], "failed")
-        self.assertIn("worker crashed", en["message"])
-        self.assertTrue(any("RunPod worker highlight failed" in line for line in logs))
+        self.assertIn(GENERIC_HIGHLIGHT_FAILURE, en["message"])
+        self.assertNotIn("worker crashed", en["message"], "the user must not see the worker error")
+        self.assertTrue(any("worker crashed" in line for line in logs), "the detail stays in the log for debugging")
 
     def test_remote_success_without_file_is_reported_as_failure(self):
         result, statuses, local, logs, tmp = self._run(write_mp4_for=[])
@@ -81,7 +83,8 @@ class RemoteHighlightFailureTests(unittest.TestCase):
         self.assertEqual(result, {})
         en = [s for s in statuses if s["code"] == "en"][0]
         self.assertEqual(en["status"], "failed")
-        self.assertIn("no highlight file", en["message"])
+        self.assertIn(GENERIC_HIGHLIGHT_FAILURE, en["message"])
+        self.assertTrue(any("No highlight file" in line for line in logs))
 
     def test_remote_success_with_file_returns_worker_output(self):
         result, statuses, local, logs, tmp = self._run(write_mp4_for=["en"])

@@ -91,7 +91,7 @@
       "<div><dt>Max workers</dt><dd>" + (workersMax == null ? "Unknown" : esc(workersMax) + " configured") + "</dd></div>" +
       "</dl>";
     var consoleLink = status.console_url
-      ? '<div class="deploy-summary-actions"><a href="' + esc(status.console_url) + '" target="_blank" rel="noopener">Open RunPod</a></div>'
+      ? '<div class="deploy-summary-actions"><a href="' + esc(status.console_url) + '" target="_blank" rel="noopener">Open cloud console</a></div>'
       : "";
 
     var items = [];
@@ -314,7 +314,7 @@
         var isServerless = banner && banner.getAttribute("data-compute-mode") === "serverless";
         var msg = isServerless
           ? "Scale serverless workers to zero? Running GPU workers stop billing; the endpoint remains."
-          : "Stop and terminate this RunPod pod? Billing stops after termination.";
+          : "Stop and terminate this pod? Billing stops after termination.";
         if (!window.confirm(msg)) return;
         stopBtn.disabled = true;
         stopBtn.textContent = "Stopping…";
@@ -332,7 +332,7 @@
     if (deleteBtn && !deleteBtn.dataset.wired) {
       deleteBtn.dataset.wired = "1";
       deleteBtn.addEventListener("click", function () {
-        if (!window.confirm("Delete the RunPod network volume? All cached model weights on this volume are permanently lost. Next cold starts re-download NLLB/Ollama/Whisper caches.")) {
+        if (!window.confirm("Delete the network volume? All cached model weights on this volume are permanently lost. Next cold starts re-download NLLB/Ollama/Whisper caches.")) {
           return;
         }
         var typed = window.prompt('Type DELETE to confirm volume deletion:', "");

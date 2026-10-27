@@ -91,7 +91,7 @@ class ProviderMappingTests(unittest.TestCase):
         result = _map(health=None, health_error="health check failed (URLError)")
         self.assertEqual(result["key"], ls.UNAVAILABLE)
         self.assertEqual(result["tone"], "amber")
-        self.assertIn("does not mean the endpoint is down", result["explanation"])
+        self.assertIn("does not mean the service is down", result["explanation"])
 
     def test_missing_or_malformed_health_fields_are_unavailable(self):
         for bad in ({}, {"workers": {"idle": 0}}, {"workers": "x", "jobs": {}},

@@ -8,7 +8,7 @@ from typing import Any
 RUNPOD_HUB_SERVERLESS_WORKERS: list[dict[str, str]] = [
     {
         "id": "worker-faster_whisper",
-        "name": "Faster Whisper (RunPod Hub)",
+        "name": "Faster Whisper (Hub)",
         "hub_path": "runpod-workers/worker-faster_whisper",
         "console_url": "https://console.runpod.io/hub/runpod-workers/worker-faster_whisper",
         "models": "Whisper transcribe only",
@@ -16,7 +16,7 @@ RUNPOD_HUB_SERVERLESS_WORKERS: list[dict[str, str]] = [
     },
     {
         "id": "worker-ollama",
-        "name": "Ollama (RunPod Hub)",
+        "name": "Ollama (Hub)",
         "hub_path": "runpod-workers/worker-ollama",
         "console_url": "https://console.runpod.io/hub/runpod-workers/worker-ollama",
         "models": "Ollama chat/completion only",
@@ -24,7 +24,7 @@ RUNPOD_HUB_SERVERLESS_WORKERS: list[dict[str, str]] = [
     },
     {
         "id": "worker-vllm",
-        "name": "vLLM (RunPod Hub)",
+        "name": "vLLM (Hub)",
         "hub_path": "runpod-workers/worker-vllm",
         "console_url": "https://console.runpod.io/hub/runpod-workers/worker-vllm",
         "models": "LLM inference",
@@ -59,10 +59,10 @@ def hub_catalog_for_ui() -> dict[str, Any]:
         "worker_image_sources": WORKER_IMAGE_SOURCES,
         "runpod_hub_workers": RUNPOD_HUB_SERVERLESS_WORKERS,
         "combined_worker_note": (
-            "RunPod Hub lists separate workers (Whisper-only, Ollama-only, NLLB community repos). "
+            "The hub lists separate workers (Whisper-only, Ollama-only, NLLB community repos). "
             "This app uses one custom image (runpod_worker/Dockerfile) that runs Whisper + Ollama + NLLB "
             "with job types heavy_phase, nllb_batch, and warmup. "
-            "Deploy Hub templates from the RunPod console for standalone APIs, or paste a Docker image "
+            "Deploy Hub templates from your cloud console for standalone APIs, or paste a Docker image "
             "you built from our Dockerfile via Hub/GitHub without using local Docker."
         ),
     }

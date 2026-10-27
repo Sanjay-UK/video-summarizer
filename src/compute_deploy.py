@@ -298,7 +298,7 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
         if not volume_id:
             return {
                 "status": "failed",
-                "message": "RunPod network volume create returned no id",
+                "message": "The network volume could not be created.",
                 "pod_id": "",
                 "endpoint_id": "",
                 "network_volume_id": "",
@@ -328,8 +328,8 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
                 return {
                     "status": "failed",
                     "message": (
-                        f"Found RunPod endpoint {existing_id} ({target_name}) but could not verify it is idle "
-                        f"(max workers 0): {capacity.message}. Check the endpoint in the RunPod console."
+                        f"Found an existing deployment ({target_name}) but could not verify it is idle "
+                        f"(max workers 0): {capacity.message}. Check it in your cloud console."
                     ),
                     "pod_id": "",
                     "endpoint_id": "",
@@ -343,7 +343,7 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
                 "reused": True,
                 # The endpoint is already warm or was warmed before; a save must not launch a warmup job.
                 "warmup_status": "skipped_reused",
-                "message": f"Reused existing RunPod endpoint {existing_id} ({target_name}); not recreated.{note}",
+                "message": f"Reused the existing deployment ({target_name}); not recreated.{note}",
                 "pod_id": "",
                 "endpoint_id": existing_id,
                 "network_volume_id": volume_id,
@@ -382,8 +382,8 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
         return {
             "status": "failed",
             "message": (
-                f"RunPod endpoint {endpoint_id} was created, but max workers could not be verified as 0: "
-                f"{capacity.message}. Set max workers to 0 in the RunPod console, then save again."
+                f"The deployment was created, but its idle setting could not be verified as 0: "
+                f"{capacity.message}. Set max workers to 0 in your cloud console, then save again."
             ),
             "pod_id": "",
             "endpoint_id": "",
@@ -395,7 +395,7 @@ def _deploy_runpod_serverless(offer: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": "deployed",
         "reused": False,
-        "message": f"RunPod serverless endpoint created ({endpoint_id}). Max workers verified at 0 (idle).",
+        "message": "Serverless deployment created. Max workers verified at 0 (idle).",
         "pod_id": "",
         "endpoint_id": endpoint_id,
         "network_volume_id": volume_id,
@@ -423,7 +423,7 @@ def _deploy_runpod(offer: dict[str, Any], api_key: str) -> dict[str, Any]:
         pod_id = payload.get("id") or payload.get("podId") or ""
         return {
             "status": "deployed",
-            "message": f"RunPod pod created ({payload.get('cloud', cloud_type)}).",
+            "message": f"GPU pod created ({payload.get('cloud', cloud_type)}).",
             "pod_id": pod_id,
             "provider_response": payload,
             "request_body": body,
@@ -434,7 +434,7 @@ def _deploy_runpod(offer: dict[str, Any], api_key: str) -> dict[str, Any]:
         detail = f"{detail} ({'; '.join(str(e) for e in errors)})"
     return {
         "status": "failed",
-        "message": f"RunPod deploy failed (HTTP {status}): {detail}",
+        "message": f"Deploy failed (HTTP {status}). Check the cloud GPU settings and try again.",
         "pod_id": "",
         "provider_response": payload,
         "request_body": body,
@@ -555,7 +555,7 @@ def stop_saved_runpod_pod() -> dict[str, Any]:
 
     offer = saved.get("offer") or {}
     if offer.get("provider") != "runpod":
-        return {"ok": False, "error": "Saved selection is not a RunPod pod"}
+        return {"ok": False, "error": "Saved selection is not a GPU pod"}
 
     deploy = saved.get("deploy") or {}
     pod_id = (deploy.get("pod_id") or "").strip()
@@ -571,7 +571,7 @@ def stop_saved_runpod_pod() -> dict[str, Any]:
         detail = payload.get("detail") or payload.get("title") or str(payload)
         return {
             "ok": False,
-            "error": f"RunPod terminate failed (HTTP {status}): {detail}",
+            "error": f"Stop failed (HTTP {status}). Try again or stop it in your cloud console.",
             "provider_response": payload,
         }
 
