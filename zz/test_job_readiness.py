@@ -151,6 +151,33 @@ class SubmitErrorClassificationTests(unittest.TestCase):
     def test_success_returns_job_id(self):
         self.assertEqual(self._submit_with(200, {"id": "abc"}), "abc")
 
+    CLOUDFLARE_502 = ("<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n"
+                      "<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>cloudflare</center>\r\n</body>\r\n</html>\r\n")
+
+    def test_gateway_502_is_not_retried_and_shows_a_short_message(self):
+        with mock.patch.object(rs, "_inference_request", return_value=(502, {"detail": self.CLOUDFLARE_502})) as req:
+            with self.assertRaises(RuntimeError) as ctx:
+                rs.submit_job(EP, JOB)
+        self.assertEqual(req.call_count, 1, "a 502 must never cause a second submit")
+        self.assertNotIsInstance(ctx.exception, rs.EndpointPausedError)
+        message = str(ctx.exception)
+        self.assertIn("HTTP 502", message)
+        self.assertIn("502 Bad Gateway", message)
+        self.assertNotIn("<html", message.lower())
+        self.assertNotIn("cloudflare", message.lower())
+        self.assertIn("Retry the highlight", message)
+
+    def test_html_error_without_title_still_gets_a_short_message(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._submit_with(503, {"detail": "<html><body>Service Unavailable</body></html>"})
+        self.assertIn("HTTP 503 from the RunPod gateway", str(ctx.exception))
+        self.assertNotIn("<html", str(ctx.exception).lower())
+
+    def test_plain_json_errors_keep_their_detail(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._submit_with(500, {"detail": "internal"})
+        self.assertIn("RunPod /run failed (HTTP 500): internal", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

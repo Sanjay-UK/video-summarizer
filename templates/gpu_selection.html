@@ -131,7 +131,7 @@
       <header class="gpu-intro">
         <h1>Cloud compute</h1>
         <p class="gpu-meta">
-          Choose a GPU for the summarizer. Saving deploys a RunPod Serverless endpoint that scales to zero when idle.
+          Choose a GPU for the summarizer. Saving deploys a serverless GPU worker that scales to zero when idle.
         </p>
       </header>
       <div class="gpu-actions">
@@ -142,7 +142,7 @@
       <h1>Cloud compute selection</h1>
       <p class="gpu-meta">
         Choose <strong>one</strong> row from either list (GPU or CPU). Save records your choice in
-        <code>data/compute_selection.json</code> and starts deploy (RunPod pod create, or AWS manual instructions).
+        <code>data/compute_selection.json</code> and starts deploy (create a GPU pod, or show setup steps).
       </p>
       <div class="gpu-actions">
         <button type="button" onclick="location.reload()">Refresh catalog</button>
@@ -151,10 +151,21 @@
       </div>
       {% endif %}
 
+      <section class="gpu-card" aria-labelledby="modeHeading">
+        <h2 id="modeHeading" class="section-title">Processing mode</h2>
+        <fieldset class="mode-choice">
+          <legend class="gpu-meta">Where should the heavy processing steps run?</legend>
+          <label><input type="radio" name="processing_mode" value="local" {% if pipeline_runtime != 'runpod' %}checked{% endif %}> Local: this computer</label>
+          <label><input type="radio" name="processing_mode" value="runpod" {% if pipeline_runtime == 'runpod' %}checked{% endif %}> GPU: cloud GPU for transcription and summary</label>
+        </fieldset>
+        <p class="gpu-meta" id="localModeNote" {% if pipeline_runtime == 'runpod' %}hidden{% endif %}>Processing runs on this computer. GPU options are hidden. Choose GPU to use a cloud GPU.</p>
+      </section>
+
       {% for err in report.errors %}
       <p class="gpu-error">{{ err }}</p>
       {% endfor %}
 
+      <div id="gpuOptions" class="gpu-options" {% if pipeline_runtime != 'runpod' %}hidden{% endif %}>
       <div id="deployStatusMount">
         {% if not (deploy_status and deploy_status.show_deploy_banner) %}
         <section class="gpu-card" id="noDeploymentNote">
@@ -236,7 +247,7 @@
               </div>
               <p class="gpu-meta" style="margin-top:10px;">{{ cat.combined_worker_note }}</p>
               <details class="gpu-meta" style="margin-top:8px;">
-                <summary>RunPod Hub templates (separate APIs, not drop-in)</summary>
+                <summary>Hub templates (separate setup, not drop-in)</summary>
                 <ul style="margin:8px 0 0 16px;">
                 {% for h in cat.runpod_hub_workers %}
                   <li><a href="{{ h.console_url }}" target="_blank" rel="noopener">{{ h.name }}</a> — {{ h.models }}. {{ h.notes }}</li>
@@ -265,7 +276,7 @@
               </option>
               {% endfor %}
             </select>
-            <p id="serverlessRegionHint" class="region-hint">Changing region loads that region's GPUs from RunPod.</p>
+            <p id="serverlessRegionHint" class="region-hint">Changing region loads that region's GPUs.</p>
             <span id="serverlessRegionStatus" class="gpu-meta" role="status"></span>
           </div>
           {% endif %}
@@ -305,8 +316,8 @@
             <span id="deployMessage" class="gpu-meta" role="status"></span>
           </div>
           <p class="gpu-meta">
-            Deploying and running GPU work can incur RunPod charges. Workers scale to zero when idle, but actual
-            charges depend on usage and RunPod pricing.
+            Deploying and running GPU work can incur cloud GPU charges. Workers scale to zero when idle, but actual
+            charges depend on usage and provider pricing.
           </p>
         </section>
         {% else %}
@@ -382,12 +393,12 @@
           <button type="submit" class="primary" id="saveDeployBtn">Save selection &amp; deploy</button>
           <span id="deployMessage" class="gpu-meta" role="status"></span>
         </div>
-        <p class="gpu-meta">Deploying and running GPU work can incur charges. Check the RunPod billing page for rates.</p>
+        <p class="gpu-meta">Deploying and running GPU work can incur charges. Check your cloud GPU account for current rates.</p>
 
-        <h2 class="section-title">RunPod GPUs (pick one)</h2>
+        <h2 class="section-title">Cloud GPUs (pick one)</h2>
         {% set gpu_sections = [
-          ('runpod-community', 'RunPod Community Cloud'),
-          ('runpod-secure', 'RunPod Secure Cloud'),
+          ('runpod-community', 'Community cloud'),
+          ('runpod-secure', 'Secure cloud'),
           ('aws-on-demand', 'AWS EC2 GPU instances (on-demand)'),
         ] %}
         {% for key, title in gpu_sections %}
@@ -423,7 +434,7 @@
 
         <h2 class="section-title">Available CPUs</h2>
         {% set cpu_sections = [
-          ('runpod-cpu-secure', 'RunPod CPU-only pods (Secure)'),
+          ('runpod-cpu-secure', 'CPU-only (Secure)'),
           ('aws-on-demand', 'AWS EC2 CPU-only instances (on-demand)'),
         ] %}
         {% for key, title in cpu_sections %}
@@ -474,15 +485,17 @@
         <h2 id="costHeading" class="section-title">Cost and scaling</h2>
         <ul class="gpu-cost-list">
           <li>Serverless workers can scale to zero when idle, as configured on the endpoint.</li>
-          <li>Compute charges depend on actual resource usage and RunPod pricing.</li>
-          <li>This app does not enforce an account-wide spend cap. Set limits in RunPod.</li>
+          <li>Compute charges depend on actual resource usage and provider pricing.</li>
+          <li>This app does not enforce an account-wide spend cap. Set limits in your cloud GPU account.</li>
         </ul>
         <p class="gpu-meta">
-          <a href="{{ rp.billing_docs_url or 'https://docs.runpod.io/accounts-billing/billing' }}" target="_blank" rel="noopener">RunPod billing and spend limits</a>
+          <a href="{{ rp.billing_docs_url or 'https://docs.runpod.io/accounts-billing/billing' }}" target="_blank" rel="noopener">Billing and spend limits</a>
           ·
           <a href="{{ rp.serverless_idle_docs_url or 'https://docs.runpod.io/sdks/graphql/manage-endpoints' }}" target="_blank" rel="noopener">Serverless idle timeout</a>
         </p>
       </section>
+
+      </div>
 
       <p class="gpu-meta">Last updated: {{ report.fetched_at }}</p>
     </main>
@@ -490,6 +503,33 @@
   <script src="{{ url_for('static', filename='js/deploy_status.js') }}"></script>
   <script>
     (function () {
+      // Processing mode: Local hides and disables every GPU control so none of them can be submitted.
+      var gpuOptions = document.getElementById('gpuOptions');
+      var localNote = document.getElementById('localModeNote');
+      function applyProcessingMode(mode) {
+        var gpu = mode === 'runpod';
+        gpuOptions.hidden = !gpu;
+        localNote.hidden = gpu;
+        gpuOptions.querySelectorAll('input, select, textarea, button').forEach(function (el) {
+          el.disabled = !gpu;
+        });
+      }
+      document.querySelectorAll('input[name="processing_mode"]').forEach(function (radio) {
+        radio.addEventListener('change', function () {
+          if (!radio.checked) return;
+          applyProcessingMode(radio.value);
+          fetch('/api/pipeline-runtime', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pipeline_runtime: radio.value }),
+          }).catch(function () {
+            alert('Could not save the processing mode. Please try again.');
+          });
+        });
+      });
+      var checked = document.querySelector('input[name="processing_mode"]:checked');
+      applyProcessingMode(checked ? checked.value : 'local');
+
       const form = document.getElementById("computeSelectForm");
       const msg = document.getElementById("deployMessage");
       const saveBtn = document.getElementById("saveDeployBtn");
@@ -503,7 +543,7 @@
         const seq = ++regionFetchSeq;
         const statusEl = document.getElementById("serverlessRegionStatus");
         const catalogEl = document.getElementById("serverlessGpuCatalog");
-        if (statusEl) statusEl.textContent = "Loading live catalog from RunPod…";
+        if (statusEl) statusEl.textContent = "Loading live catalog…";
         if (catalogEl) catalogEl.setAttribute("aria-busy", "true");
         try {
           const res = await fetch(

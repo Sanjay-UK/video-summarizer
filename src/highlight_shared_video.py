@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from src.highlight_assembler import build_scene_visual_only, mux_scene, pad_narration_audio
 from src.highlight_timing import scene_display_duration
-from src.highlight_tts import generate_scene_narration
+from src.highlight_tts import TtsResult, generate_scene_narration
 from src.locales import get_locale
 from src.visual_extractor import VisualSelection
 
@@ -63,9 +64,10 @@ def ensure_shared_scene_visuals(
         scene_dir.mkdir(parents=True, exist_ok=True)
         tts = generate_scene_narration(
             str(spoken).strip(),
-            scene_dir / "master_narration.mp3",
+            scene_dir / MASTER_NARRATION_AUDIO,
             locale=locale_en,
         )
+        save_master_narration(scene_dir, str(spoken).strip(), tts)
         display_sec = scene_display_duration(tts.duration_seconds)
         visual_out = scene_dir / "visual.mp4"
         build_scene_visual_only(visual, display_sec, scene_dir, visual_out)
@@ -81,6 +83,66 @@ def ensure_shared_scene_visuals(
     payload = {"scenes": manifest_scenes}
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return manifest_scenes
+
+
+MASTER_NARRATION_META = "master_narration.json"
+MASTER_NARRATION_AUDIO = "master_narration.mp3"
+
+
+def save_master_narration(scene_dir: Path, text: str, tts: TtsResult) -> None:
+    """Record the English narration made for the timing pass, so the English render can reuse that exact audio.
+
+    The text is stored with it. A reuse is allowed only when the text is unchanged.
+    """
+    payload = {
+        "text": text,
+        "duration_seconds": tts.duration_seconds,
+        "boundary_kind": tts.boundary_kind,
+        "boundaries": tts.boundaries,
+        "voice_used": tts.voice_used,
+    }
+    (scene_dir / MASTER_NARRATION_META).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def load_master_narration(job_output_dir: Path, scene_index: int, text: str) -> Optional[TtsResult]:
+    """The saved English narration for a scene, or None when it is missing, unreadable, or for different text.
+
+    None means the caller must synthesize the narration itself. A stale file is never returned.
+    """
+    scene_dir = shared_highlight_dir(job_output_dir) / f"scene_{scene_index:03d}"
+    meta_path = scene_dir / MASTER_NARRATION_META
+    audio_path = scene_dir / MASTER_NARRATION_AUDIO
+    if not meta_path.is_file() or not audio_path.is_file():
+        return None
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        duration = float(payload["duration_seconds"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if str(payload.get("text", "")).strip() != str(text).strip():
+        return None
+    return TtsResult(
+        audio_path=audio_path,
+        spoken_text=str(text).strip(),
+        duration_seconds=duration,
+        boundary_kind=payload.get("boundary_kind", "none"),
+        boundaries=list(payload.get("boundaries") or []),
+        voice_used=str(payload.get("voice_used") or ""),
+    )
+
+
+def copy_master_narration(master: TtsResult, output_path: Path) -> TtsResult:
+    """Copy the shared English narration into a language folder. Same audio, same timing, no new synthesis."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(master.audio_path, output_path)
+    return TtsResult(
+        audio_path=output_path,
+        spoken_text=master.spoken_text,
+        duration_seconds=master.duration_seconds,
+        boundary_kind=master.boundary_kind,
+        boundaries=list(master.boundaries),
+        voice_used=master.voice_used,
+    )
 
 
 def mux_language_scene(

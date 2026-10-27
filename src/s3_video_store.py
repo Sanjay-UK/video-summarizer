@@ -313,7 +313,7 @@ def highlight_url(
         raise HighlightStoreError("invalid_language", "Unsupported highlight language.")
     record = read_highlight_records(job_dir).get(lang_code)
     if not record or record.get("status") != "uploaded":
-        raise HighlightStoreError("not_in_s3", "This highlight is not stored in S3.")
+        raise HighlightStoreError("not_in_s3", "This highlight video is not available for download.")
     key = record.get("key")
     if not isinstance(key, str) or not _HIGHLIGHT_KEY_RE.match(key) or record.get("bucket") != store.bucket:
         raise HighlightStoreError("invalid_record", "The stored highlight record is not valid, so it was not used.")
@@ -331,7 +331,7 @@ def highlight_url(
     except Exception as exc:  # noqa: BLE001
         code = error_code(exc)
         if code in ("404", "NoSuchKey", "NotFound"):
-            raise HighlightStoreError("object_missing", "The highlight is missing from S3.") from None
+            raise HighlightStoreError("object_missing", "The highlight video is no longer available. Please render it again.") from None
         raise HighlightStoreError(
             "s3_access", f"S3 refused the request ({code}). Check the video-summarizer AWS profile."
         ) from None
@@ -345,7 +345,7 @@ def highlight_url(
             disposition=disposition,
         )
     except Exception as exc:  # noqa: BLE001
-        raise HighlightStoreError("presign_failed", f"Could not sign the link ({error_code(exc)}).") from None
+        raise HighlightStoreError("presign_failed", "The download link could not be created. Please try again.") from None
 
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=HIGHLIGHT_URL_EXPIRES)
     return {

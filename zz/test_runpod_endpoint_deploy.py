@@ -131,7 +131,7 @@ class CreateNewEndpointTests(DeployTestBase):
         fake = FakeRunpod(endpoints=[], honor_patch=False)
         result = self.deploy(fake, {})
         self.assertEqual(result["status"], "failed")
-        self.assertIn("new123", result["message"])
+        self.assertNotIn("new123", result["message"], "the endpoint ID is infrastructure and is not shown to users")
         self.assertIn("expected 0", result["message"])
         self.assertEqual(result["endpoint_id"], "", "an unverified endpoint is not saved as the active endpoint")
 

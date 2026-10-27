@@ -200,10 +200,10 @@ def _runpod_gpu_offers(api_key: str) -> tuple[list[ComputeOffer], str | None]:
         try:
             gpus = _fetch_runpod_gpus(cloud, api_key)
         except urllib.error.HTTPError as exc:
-            errors.append(f"RunPod GPU {cloud}: HTTP {exc.code}")
+            errors.append(f"GPU options could not be loaded for the {cloud.lower()} cloud (status {exc.code}).")
             continue
         except OSError as exc:
-            errors.append(f"RunPod GPU {cloud}: {exc}")
+            errors.append(f"GPU options could not be loaded for the {cloud.lower()} cloud. Try again later.")
             continue
         for g in gpus:
             avail = (g.get("availability") or "").upper()
@@ -225,7 +225,7 @@ def _runpod_gpu_offers(api_key: str) -> tuple[list[ComputeOffer], str | None]:
                     availability=avail,
                     vram_gb=mem,
                     resource_id=g.get("id") or name,
-                    notes=f"RunPod {cloud.title()} Cloud",
+                    notes=f"{cloud.title()} cloud",
                 )
             )
     return offers, ("; ".join(errors) if errors else None)
@@ -238,9 +238,9 @@ def _runpod_cpu_offers(api_key: str) -> tuple[list[ComputeOffer], str | None]:
     try:
         payload = _http_get_json(url, api_key)
     except urllib.error.HTTPError as exc:
-        return [], f"RunPod CPU catalog: HTTP {exc.code}"
+        return [], f"CPU options could not be loaded (status {exc.code})."
     except OSError as exc:
-        return [], f"RunPod CPU catalog: {exc}"
+        return [], "CPU options could not be loaded. Try again later."
 
     offers: list[ComputeOffer] = []
     for c in payload.get("cpus") or []:

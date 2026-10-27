@@ -2,6 +2,7 @@
 """Flask web app for video summarization."""
 
 from src.log_safety import redact, safe_exc, safe_traceback
+from src.user_messages import GENERIC_FAILURE, GENERIC_HIGHLIGHT_FAILURE, public_error, public_log_line
 import json
 import re
 import sys
@@ -32,7 +33,12 @@ from src.highlight_jobs import (
     read_highlight_status,
     write_highlight_status,
 )
-from src.highlight_pipeline import _write_lang_failure, retry_highlight_languages
+from src.highlight_pipeline import (
+    _write_lang_failure,
+    record_unrecorded_highlight_failures,
+    retry_highlight_languages,
+)
+from src.highlight_assembler import ensure_narration_track
 from src import s3_video_store as s3
 from src.locales import LOCALES, parse_language_list
 from src.youtube_errors import (
@@ -183,8 +189,11 @@ class JobProgress:
     def add_log(self, message):
         """Add a log line."""
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_lines.append(f"[{timestamp}] {message}")
+        # The console keeps the full detail for debugging. The progress screen gets only user-safe lines.
         print(f"[{self.job_id}] {message}")
+        shown = public_log_line(message)
+        if shown is not None:
+            self.log_lines.append(f"[{timestamp}] {shown}")
 
     def set_step(self, step_name, progress, indeterminate=False):
         """Start a stage. indeterminate=True means no progress inside this stage can be measured."""
@@ -215,7 +224,7 @@ class JobProgress:
         with self._lock:
             self.indeterminate = False
             self.status = "error"
-            self.error = sanitize_technical(str(message), limit=400) or "The job failed."
+            self.error = public_error(sanitize_technical(str(message), limit=400), default=GENERIC_FAILURE)
             self.error_code = code
             self.completed_at = datetime.now()
 
@@ -386,7 +395,7 @@ def process_video(
                 from src.runpod_ssh import probe_runpod_ssh_reachable
 
                 transport = os.environ.get("RUNPOD_REMOTE_TRANSPORT", "auto").strip().lower()
-                job.add_log("Checking RunPod connectivity before GPU work...")
+                job.add_log("Checking connection before processing...")
                 if transport in ("http", "jupyter"):
                     from src.runpod_jupyter import probe_jupyter_reachable
 
@@ -411,7 +420,7 @@ def process_video(
         job.progress_source = "runpod" if remote_heavy else "local"
         job.set_step("transcribing", 0.35, indeterminate=remote_heavy)
         if remote_heavy:
-            job.add_log("RunPod GPU is transcribing and summarizing. The worker does not report progress yet.")
+            job.add_log("Transcribing and summarizing. Progress is not reported during this step.")
         executor.run_heavy_phase(
             job_id=job_id,
             audio_path=audio_path,
@@ -510,18 +519,20 @@ def process_video(
                     highlight_paths = {"en": highlight_out}
                     job.add_log(f"Highlight en ready: {highlight_out.name}")
                 # A requested language that was attempted but produced neither a file nor a status record is a failure.
-                recorded = read_highlight_status(job.job_output_dir).get("languages") or {}
-                for code in lang_codes:
-                    if not highlight_file_for_lang(job.job_output_dir, code).is_file() and code not in recorded:
-                        _write_lang_failure(
-                            job.job_output_dir, code, "No highlight file was produced for this language.",
-                            failure_kind="missing_output",
-                        )
+                record_unrecorded_highlight_failures(
+                    job.job_output_dir, lang_codes, "No highlight file was produced for this language.",
+                    failure_kind="missing_output",
+                )
                 for row in list_highlight_language_status(job.job_output_dir):
                     if row["status"] == "failed":
                         job.add_log(f"Highlight {row['code']} failed: {row.get('message', '')}")
             except Exception as e:
                 job.add_log(f"Highlight video failed: {sanitize_technical(redact(str(e)))}")
+                # The step stopped before reporting on the languages. Record them as failed so the results page shows
+                # the failure and offers a retry, instead of "Not generated" with no reason.
+                record_unrecorded_highlight_failures(
+                    job.job_output_dir, lang_codes, GENERIC_HIGHLIGHT_FAILURE, failure_kind="error",
+                )
             job.set_step("highlight_complete", 0.98)
         else:
             job.set_step("generating_subtitles", 0.98)
@@ -630,7 +641,7 @@ def index():
 def gpu_selection_page():
     """Live GPU availability and ranking for cloud runs (demo)."""
     report = build_gpu_selection_report()
-    return render_template("gpu_selection.html", report=report)
+    return render_template("gpu_selection.html", report=report, pipeline_runtime=load_pipeline_runtime())
 
 
 @app.route("/api/compute-deploy-status", methods=["GET"])
@@ -869,7 +880,7 @@ def _failed_job_payload(job_dir: Path):
         return None
     if metadata.get("status") != "error":
         return None
-    return {"error": metadata.get("error") or "Job failed", "code": metadata.get("error_code")}
+    return {"error": public_error(metadata.get("error"), default=GENERIC_FAILURE), "code": metadata.get("error_code")}
 
 
 @app.route("/api/results/<job_id>", methods=["GET"])
@@ -987,14 +998,29 @@ def download_subtitles(job_id):
 
 @app.route("/download/audio/<job_id>")
 def download_audio(job_id):
-    """Download audio explanation."""
-    try:
-        job = jobs.get(job_id)
-        if job:
-            file_path = job.job_output_dir / "audio_explanation.mp3"
-        else:
-            file_path = OUTPUT_DIR / job_id / "audio_explanation.mp3"
+    """English audio download.
 
+    When English highlights were requested, the download is the narration from the highlight video, so the audio and
+    the video have the same length and timing. If that audio is missing, the response says so; the summary audio is
+    never returned in its place. `?source=summary` returns the full summary narration instead.
+    """
+    if not _valid_job_id(job_id):
+        return jsonify({"error": "Job not found"}), 404
+    try:
+        job_dir = _job_output_dir(job_id)
+        if request.args.get("source") != "summary":
+            requested = read_highlight_status(job_dir).get("requested_languages") or []
+            if "en" in requested:
+                track = ensure_narration_track(job_dir / "highlights" / "en")
+                if track is not None:
+                    return send_file(
+                        track,
+                        as_attachment=True,
+                        download_name="highlight_narration_en.mp3",
+                        mimetype="audio/mpeg",
+                    )
+                return jsonify({"error": "The highlight audio is not available for this job."}), 404
+        file_path = job_dir / "audio_explanation.mp3"
         if file_path.exists():
             return send_file(
                 file_path,
@@ -1006,6 +1032,7 @@ def download_audio(job_id):
     except Exception as e:
         print(f"[ERROR] Download audio failed: {safe_exc(e)}")
         return "File not found", 404
+
 
 def _job_output_dir(job_id: str) -> Path:
     job = jobs.get(job_id)
@@ -1026,8 +1053,8 @@ def retry_highlight(job_id):
             # The retry path renders on this machine and never uploads to S3. Refuse rather than do local
             # processing in RunPod mode. A serverless retry needs its own implementation and tests.
             return jsonify({
-                "error": "Retrying a highlight is not available in RunPod mode yet, so nothing was rendered "
-                         "locally. Switch to Local mode to retry on this machine, or re-run the job on RunPod.",
+                "error": "Retrying a highlight is not available in the current processing mode yet. "
+                         "Switch to Local mode on the GPU selection page to retry on this machine.",
                 "code": "retry_unavailable_runpod",
             }), 409
         job_dir = _job_output_dir(job_id)
@@ -1103,7 +1130,8 @@ def api_highlight_url(job_id, lang_code):
         return jsonify({"error": redact(str(exc)), "code": exc.code}), s3.ERROR_STATUS.get(exc.code, 500), NO_STORE
     except Exception as exc:  # noqa: BLE001 — log the type only; messages can carry sensitive detail
         print(f"[S3] highlight link for {job_id}/{code} failed: {type(exc).__name__}")
-        return jsonify({"error": "S3 is unavailable for this highlight.", "code": "s3_unavailable"}), 503, NO_STORE
+        return jsonify({"error": "The highlight video is temporarily unavailable. Please try again.",
+                        "code": "s3_unavailable"}), 503, NO_STORE
     print(f"[S3] highlight link for {job_id}/{code} issued")
     return jsonify(payload), 200, NO_STORE
 

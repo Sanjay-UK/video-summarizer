@@ -100,7 +100,7 @@ def resolve_runtime_for_job(requested: str | None = None) -> dict[str, Any]:
         endpoint_id = (deploy.get("endpoint_id") or "").strip()
         if deploy.get("deploy_record_status") != "deployed" or not endpoint_id:
             msg = (
-                "RunPod serverless mode requires a deployed endpoint. "
+                "Serverless GPU mode requires a deployed endpoint. "
                 "Save GPU selection on the GPU page (set RUNPOD_SERVERLESS_IMAGE and RUNPOD_DATA_CENTER_ID)."
             )
             return {"runtime": RUNTIME_RUNPOD, "mode": "hybrid_runpod", "error": msg}
@@ -111,7 +111,7 @@ def resolve_runtime_for_job(requested: str | None = None) -> dict[str, Any]:
             "whisper_device": "cuda",
             "ollama_host": os.environ.get("RUNPOD_OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434",
             "location_label": (
-                f"hybrid — heavy + highlight FFmpeg on RunPod serverless {endpoint_id}"
+                "hybrid — heavy steps on GPU, highlight FFmpeg local"
             ),
             "heavy_location": "runpod_serverless",
             "light_location": "local",
@@ -121,7 +121,7 @@ def resolve_runtime_for_job(requested: str | None = None) -> dict[str, Any]:
 
     if deploy.get("phase") != "running":
         msg = (
-            "RunPod GPU mode requires a running pod. "
+            "GPU pod mode requires a running pod. "
             "Deploy from GPU selection or choose This machine."
         )
         return {"runtime": RUNTIME_RUNPOD, "mode": "hybrid_runpod", "error": msg}
@@ -135,7 +135,7 @@ def resolve_runtime_for_job(requested: str | None = None) -> dict[str, Any]:
         "mode": "hybrid_runpod",
         "whisper_device": "cuda",
         "ollama_host": runpod_ollama,
-        "location_label": f"hybrid — heavy on RunPod pod {pod_id}, light steps local",
+        "location_label": "hybrid — heavy steps on GPU pod, light steps local",
         "heavy_location": "runpod",
         "light_location": "local",
         "runpod_pod_id": pod_id,

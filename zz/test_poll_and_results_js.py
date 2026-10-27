@@ -22,15 +22,26 @@ function slice(from, to) {
   if (a < 0 || b < 0) throw new Error('missing section: ' + from);
   return src.slice(a, b);
 }
-const subtaskBlock = src.slice(src.indexOf('const SUBTASK_STEPS = {'), src.indexOf('};', src.indexOf('const SUBTASK_STEPS = {')) + 2);
+const subtaskBlock = src.slice(src.indexOf('// Pipeline order of the steps'), src.indexOf('let highlightRequested'));
 const API_BASE = '/api';
 const failureRule = new Function(slice('function failureMessageFor(', 'let progressGeneration = 0;') + '; return { failureMessageFor };')();
 const pollRules = new Function('API_BASE',
   slice('function shouldApplyPoll(', 'function startProgressPolling(') + '; return { shouldApplyPoll };')(API_BASE);
 const views = new Function('API_BASE',
   slice('const STEP_LABELS = {', 'function updateProgressUI(') + '; return { progressViewFor, stageLabel };')(API_BASE);
-const subtasks = new Function(subtaskBlock + '\n' +
-  slice('function subtaskStates(', 'function updateSubtaskUI(') + '; return { subtaskStates };')();
+// A fresh copy per checklist, because the furthest-step memory is per job.
+const makeChecklist = () => new Function(subtaskBlock + '\n' +
+  slice('function subtaskStates(', 'async function fetchResultsOrError(') + '; return { subtaskStates, updateSubtaskUI };')();
+function fakeElement() {
+  const classes = new Set();
+  return {
+    classes,
+    style: {},
+    classList: { toggle: (c, on) => { if (on) classes.add(c); else classes.delete(c); } },
+    querySelector: () => ({ textContent: '' }),
+  };
+}
+const subtasks = makeChecklist();
 const results = new Function('API_BASE',
   slice('async function fetchResultsOrError(', 'async function showResults(') + '; return { fetchResultsOrError };')(API_BASE);
 const fetchStub = (behaviour) => (url, opts) => behaviour(url, opts);
@@ -51,9 +62,30 @@ const fetchStub = (behaviour) => (url, opts) => behaviour(url, opts);
   const view = views.progressViewFor({ status: 'processing', progress: 0.2 }, 50);
   out.consistency = {
     barPercent: view.percent,
-    checkmarksAt: subtasks.subtaskStates('transcribing', view.percent),
-    rawProgressWouldShow: subtasks.subtaskStates('transcribing', 20),
+    checkmarksAt: subtasks.subtaskStates('transcribing', false),
   };
+  // Checklist driven through updateSubtaskUI against a stub DOM, as the progress poll does it.
+  const snapshot = (dom) => Object.fromEntries(Object.entries(dom).map(([id, el]) => [id.replace('subtask-', ''), {
+    state: el.classes.has('active') ? 'active' : el.classes.has('completed') ? 'completed' : 'pending',
+    display: el.style.display || '',
+  }]));
+  const stubDocument = () => {
+    const dom = {};
+    globalThis.document = { getElementById: (id) => dom[id] || (dom[id] = fakeElement()) };
+    return dom;
+  };
+  const highlightRun = stubDocument();
+  const highlightChecklist = makeChecklist();
+  highlightChecklist.updateSubtaskUI('highlight_assembly', false);
+  out.checklist = { highlightAssembly: snapshot(highlightRun) };
+  highlightChecklist.updateSubtaskUI('generating_subtitles', false);
+  out.checklist.afterStaleSubtitlesReport = snapshot(highlightRun);
+  const summarizeRun = stubDocument();
+  makeChecklist().updateSubtaskUI('translating', false);
+  out.checklist.translating = snapshot(summarizeRun);
+  const doneRun = stubDocument();
+  makeChecklist().updateSubtaskUI('highlight_complete', true);
+  out.checklist.finished = snapshot(doneRun);
   out.labels = {
     translating: views.progressViewFor({ status: 'processing', indeterminate: true, current_step: 'translating' }, 60).label,
     highlight: views.progressViewFor({ status: 'processing', indeterminate: true, current_step: 'highlight_assembly' }, 92).label,
@@ -115,12 +147,37 @@ class PollAndResultsTests(unittest.TestCase):
     def test_responses_without_a_job_id_are_still_accepted(self):
         self.assertTrue(self.r["poll"]["responseWithoutJobId"], "older servers do not send job_id")
 
-    def test_checkmarks_follow_the_displayed_value_not_the_raw_backend_value(self):
+    def test_checkmarks_follow_the_reported_step_in_pipeline_order(self):
         self.assertEqual(self.r["consistency"]["barPercent"], 50)
         states = self.r["consistency"]["checkmarksAt"]
         self.assertEqual(states["extracting_audio"], "completed")
         self.assertEqual(states["transcribing"], "active")
-        self.assertNotEqual(self.r["consistency"]["checkmarksAt"], self.r["consistency"]["rawProgressWouldShow"])
+        self.assertEqual(states["summarizing"], "pending")
+
+    def test_status_at_highlight_rendering_shows_every_earlier_step_done(self):
+        # Regression: the status line said "Rendering highlight video (RunPod GPU)" while the checklist stopped at
+        # Summarize, because the checklist compared fixed percentages with the backend's values.
+        items = self.r["checklist"]["highlightAssembly"]
+        for name in ("download", "audio", "transcribe", "summarize", "audio-gen", "subtitles"):
+            self.assertEqual(items[name]["state"], "completed", name)
+        self.assertEqual(items["highlight"]["state"], "active")
+        self.assertNotEqual(items["highlight"]["display"], "none")
+
+    def test_a_late_earlier_step_report_does_not_move_the_checklist_back(self):
+        items = self.r["checklist"]["afterStaleSubtitlesReport"]
+        self.assertEqual(items["highlight"]["state"], "active")
+        self.assertEqual(items["subtitles"]["state"], "completed")
+
+    def test_translating_is_part_of_the_summarize_item(self):
+        items = self.r["checklist"]["translating"]
+        self.assertEqual(items["summarize"]["state"], "active")
+        self.assertEqual(items["transcribe"]["state"], "completed")
+        self.assertEqual(items["audio-gen"]["state"], "pending")
+
+    def test_completed_job_marks_every_item_done(self):
+        items = self.r["checklist"]["finished"]
+        for name, item in items.items():
+            self.assertEqual(item["state"], "completed", name)
 
     def test_stage_labels_name_the_real_stage(self):
         self.assertEqual(self.r["labels"]["translating"], "Translating summary")

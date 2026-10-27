@@ -172,14 +172,14 @@ class GpuPageRenderTests(unittest.TestCase):
         self.assertIn("Reported: running 0 · idle 0", visible)
         self.assertNotIn("active count not reported", visible)
         self.assertIn('id="refreshDeployStatusBtn"', visible)
-        self.assertIn("Open RunPod", visible)
+        self.assertIn("Open cloud console", visible)
 
     def test_unverified_status_is_not_presented_as_running(self):
         status = _deployed_status(runpod_error="timeout talking to RunPod", workers_max=None, workers_min=None,
                                   live=_live(error="timeout talking to RunPod"))
         visible = _visible_main(self._render(_serverless_report(), status))
         self.assertIn("Status unavailable", visible)
-        self.assertIn("Could not read the endpoint settings", visible)
+        self.assertIn("Could not read the deployment settings", visible)
         self.assertNotIn("Idle — no workers running", visible)
         self.assertNotIn(">Running<", visible)
 
@@ -221,7 +221,7 @@ class GpuPageRenderTests(unittest.TestCase):
         html = self._render(_serverless_report(), _deployed_status())
         self.assertEqual(html.count('id="saveDeployBtn"'), 1)
         self.assertIn("Save selection &amp; deploy", html)
-        self.assertIn("can incur RunPod charges", html)
+        self.assertIn("can incur cloud GPU charges", html)
         for field in ('id="serverlessRegionSelect"', 'name="serverless_data_center_id"', 'id="ssRegistryImage"',
                       'name="docker_hub_user"', 'id="deployMessage"', 'id="computeSelectForm"'):
             self.assertIn(field, html)
@@ -257,7 +257,7 @@ class GpuPageRenderTests(unittest.TestCase):
         )
         html = self._render(report, {"show_deploy_banner": False})
         self.assertIn("Cloud compute selection", html)
-        self.assertIn("RunPod GPUs (pick one)", html)
+        self.assertIn("Cloud GPUs (pick one)", html)
         self.assertIn("RTX 4090 Pod", html)
         self.assertIn("Available CPUs", html)
 

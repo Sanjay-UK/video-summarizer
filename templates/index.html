@@ -16,27 +16,6 @@
  <h2>VideoSummarize</h2>
  <span class="tagline">Transform videos into summaries</span>
  </div>
- <div class="navbar-actions">
- <label class="navbar-runtime-toggle">
- <span class="navbar-runtime-label">RunPod GPU</span>
- <input
- type="checkbox"
- id="pipelineRuntimeToggle"
- class="navbar-runtime-checkbox"
- {% if pipeline_runtime == 'runpod' %}checked{% endif %}
- aria-label="Use RunPod GPU for heavy pipeline steps"
- >
- <span class="navbar-toggle-track" aria-hidden="true">
- <span class="navbar-toggle-thumb"></span>
- </span>
- </label>
- <a
- href="/gpu-selection"
- id="navbarGpuLink"
- class="navbar-gpu-link"
- {% if pipeline_runtime != 'runpod' %}hidden{% endif %}
- >GPU selection</a>
- </div>
  </div>
  </nav>
 
@@ -114,7 +93,7 @@
  <input type="checkbox" id="highlightVideo" name="highlight_video" value="1" onchange="toggleHighlightLangPanel()">
  <span>
  <span class="option-label">Generate highlight video</span>
- <span class="option-desc" style="display: block;">Optional narrated MP4 with key scenes. Requires FFmpeg with subtitles support. Translation uses Google Translate.</span>
+ <span class="option-desc" style="display: block;">Optional narrated MP4 with key scenes. Requires FFmpeg with subtitles support. Translation is included.</span>
  </span>
  </label>
 

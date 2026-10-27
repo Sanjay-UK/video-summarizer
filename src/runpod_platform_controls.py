@@ -26,7 +26,7 @@ def platform_controls_status() -> dict[str, Any]:
         "idle_auto_stop_native": RUNPOD_IDLE_NATIVE_FOR_STANDARD_PODS,
         "idle_auto_stop_note": (
             "Standard RunPod pods have no inactivity timer on POST /v2/pods. "
-            "Use the RunPod console (Idle Pod Monitor template) for account-wide idle stop, "
+            "Use your cloud console (Idle Pod Monitor template) for account-wide idle stop, "
             "or Serverless endpoints with idleTimeout for scale-to-zero workers."
         ),
         "idle_monitor_url": RUNPOD_IDLE_MONITOR_REPO,

@@ -30,6 +30,30 @@ SAMPLES = {
 }
 
 
+def _family_name(path: Path) -> str:
+    """The family name (name ID 1) stored inside a TrueType file. libass matches ASS styles against this name."""
+    data = path.read_bytes()
+    num_tables = int.from_bytes(data[4:6], "big")
+    for i in range(num_tables):
+        record = 12 + 16 * i
+        if data[record:record + 4] != b"name":
+            continue
+        table = int.from_bytes(data[record + 8:record + 12], "big")
+        count = int.from_bytes(data[table + 2:table + 4], "big")
+        string_base = table + int.from_bytes(data[table + 4:table + 6], "big")
+        for r in range(count):
+            rec = table + 6 + 12 * r
+            platform, name_id = int.from_bytes(data[rec:rec + 2], "big"), int.from_bytes(data[rec + 6:rec + 8], "big")
+            length = int.from_bytes(data[rec + 8:rec + 10], "big")
+            offset = int.from_bytes(data[rec + 10:rec + 12], "big")
+            if name_id != 1:
+                continue
+            raw = data[string_base + offset:string_base + offset + length]
+            # Platform 1 (Mac) is single-byte text; the Unicode and Windows platforms are UTF-16 big-endian.
+            return raw.decode("latin-1" if platform == 1 else "utf-16-be")
+    raise ValueError(f"no family name in {path}")
+
+
 def _ass(samples):
     lines = [
         "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1280", "PlayResY: 360", "",
@@ -66,6 +90,13 @@ class WiringTests(unittest.TestCase):
         for code, spec in LOCALES.items():
             with self.subTest(language=code):
                 self.assertTrue(Path(spec.caption_font_file).is_file(), spec.caption_font_file)
+
+    def test_every_caption_style_names_the_family_its_bundled_file_declares(self):
+        # libass looks a style up by the family name inside the file. A style naming a different family silently
+        # falls back to a default face, which can lack the script and draw boxes.
+        for code, spec in LOCALES.items():
+            with self.subTest(language=code):
+                self.assertEqual(_family_name(Path(spec.caption_font_file)), spec.caption_font_name)
 
     def test_missing_glyph_report_is_detected_in_ffmpeg_stderr(self):
         report = "[Parsed_subtitles_0 @ 0x1] fontselect: failed to find any fallback with glyph 0x902 for font"
@@ -156,6 +187,32 @@ class RenderingTests(unittest.TestCase):
         mixed = "English हिंदी ಕನ್ನಡ தமிழ் తెలుగు"
         frame, stderr = self._render(FONTS_DIR, [("DejaVu Sans", mixed)])
         self.assertFalse(ha.subtitle_glyphs_missing(stderr), stderr)
+
+    def test_production_filter_renders_each_language_from_a_project_path_with_spaces(self):
+        # Uses the same filter string as mux_scene, so the escaping of the fonts path is what gets tested. The fonts
+        # are copied to a directory whose name has a space and parentheses (the project path has a space on macOS),
+        # and the production code is pointed at that copy, so the test does not depend on where the repo lives.
+        spaced = Path(tempfile.mkdtemp(prefix="fonts with space (x) "))
+        self.addCleanup(shutil.rmtree, spaced, True)
+        for font in FONTS_DIR.glob("*.ttf"):
+            shutil.copy2(font, spaced / font.name)
+        for code, spec in LOCALES.items():
+            with self.subTest(language=code), mock.patch.object(ha, "FONTS_DIR", spaced):
+                tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(tmp.cleanup)
+                work = Path(tmp.name)
+                ass = work / "caption.ass"
+                ass.write_text(_ass([(spec.caption_font_name, SAMPLES[spec.caption_font_name])]), encoding="utf-8")
+                vf = ha._subtitles_filter(ass)
+                self.assertIn("fontsdir=", vf)
+                proc = subprocess.run(
+                    [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
+                     "-f", "lavfi", "-i", "color=c=black:s=1280x360:d=5",
+                     "-vf", vf, "-frames:v", "1", str(work / "frame.png")],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertFalse(ha.subtitle_glyphs_missing(proc.stderr), proc.stderr)
 
 
 if __name__ == "__main__":

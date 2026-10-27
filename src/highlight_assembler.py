@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from config import (
     HIGHLIGHT_AUDIO_RATE,
@@ -15,6 +17,7 @@ from config import (
     PROJECT_DIR,
 )
 from src.locales import FONTS_DIR
+from src.log_safety import safe_exc
 from src.highlight_ffmpeg import escape_ffmpeg_filter_path, probe_duration_seconds, run_ffmpeg
 from src.highlight_timing import scene_display_duration
 from src.visual_extractor import VisualSelection
@@ -298,6 +301,50 @@ def build_scene_video(
 
     scene_out = work_dir / f"{tag}_final.mp4"
     return mux_scene(visual_out, padded_audio, ass_path, dur, scene_out)
+
+
+# The English narration track kept next to highlight_en.mp4. The audio download serves this file.
+HIGHLIGHT_NARRATION_FILE = "highlight_narration_en.mp3"
+ENGLISH_HIGHLIGHT_VIDEO = "highlight_en.mp4"
+
+
+def extract_narration_track(video_path: Path, output_mp3: Path) -> Path:
+    """The narration exactly as it plays in the finished highlight video, as an MP3. No speech is synthesized again.
+
+    The MP3 is written under a temporary name and moved into place only when it is complete and not empty.
+    """
+    output_mp3.parent.mkdir(parents=True, exist_ok=True)
+    partial = output_mp3.with_name(output_mp3.stem + ".partial.mp3")
+    try:
+        run_ffmpeg(["-i", str(video_path), "-vn", "-c:a", "libmp3lame", "-q:a", "2", str(partial)])
+        if not partial.is_file() or partial.stat().st_size == 0:
+            raise RuntimeError("the extracted narration is empty")
+        os.replace(partial, output_mp3)
+    except Exception:
+        partial.unlink(missing_ok=True)  # never leave a partial file behind
+        raise
+    return output_mp3
+
+
+def ensure_narration_track(english_dir: Path) -> Optional[Path]:
+    """The English narration track for the English highlight video in english_dir, made from that video if needed.
+
+    Returns None when there is no usable video, or the track cannot be made. A track older than its video is rebuilt,
+    so a stale narration is never returned. No speech is synthesized here.
+    """
+    video = english_dir / ENGLISH_HIGHLIGHT_VIDEO
+    track = english_dir / HIGHLIGHT_NARRATION_FILE
+    if not video.is_file() or video.stat().st_size == 0:
+        track.unlink(missing_ok=True)
+        return None
+    if track.is_file() and track.stat().st_size > 0 and track.stat().st_mtime >= video.stat().st_mtime:
+        return track
+    try:
+        return extract_narration_track(video, track)
+    except Exception as exc:  # noqa: BLE001 — the video is still good; the audio download reports the gap
+        print(f"[highlight] English narration track could not be made: {safe_exc(exc)}", file=sys.stderr)
+        track.unlink(missing_ok=True)
+        return None
 
 
 def concat_scenes(scene_paths: list[Path], output_path: Path) -> Path:

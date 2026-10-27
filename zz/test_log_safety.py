@@ -221,7 +221,7 @@ class PipelinePathTests(unittest.TestCase):
         _write_lang_failure(job_dir, "hi", f"render failed for {SIGNED}", failure_kind="error")
         saved = (job_dir / "highlights" / "highlight_status.json").read_text(encoding="utf-8")
         _assert_clean(self, saved)
-        self.assertIn("render failed", saved)
+        self.assertIn("could not be created", saved)  # the user sees neutral text; the detail is logged
 
 
 class CallSiteTests(unittest.TestCase):

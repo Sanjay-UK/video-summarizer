@@ -35,9 +35,9 @@ def fetch_serverless_gpu_offers(api_key: str) -> tuple[list[dict[str, Any]], str
     try:
         payload = _http_get_json(f"{RUNPOD_GPU_CATALOG_URL}?{params}", api_key)
     except urllib.error.HTTPError as exc:
-        return [], f"RunPod serverless GPU catalog: HTTP {exc.code}"
+        return [], f"GPU catalog could not be loaded (status {exc.code})."
     except OSError as exc:
-        return [], f"RunPod serverless GPU catalog: {exc}"
+        return [], "GPU catalog could not be loaded. Try again later."
 
     rows: list[dict[str, Any]] = []
     for g in payload.get("gpus") or []:
@@ -176,8 +176,8 @@ def serverless_sections_for_ui(
         rows = filter_rows_by_datacenter(rows, data_center_id)
     sections: list[dict[str, Any]] = []
     for key, title, flag in (
-        ("runpod-serverless-secure", "RunPod Secure Cloud — Serverless GPUs", "secure"),
-        ("runpod-serverless-community", "RunPod Community Cloud — Serverless GPUs", "community"),
+        ("runpod-serverless-secure", "Secure cloud — serverless GPUs", "secure"),
+        ("runpod-serverless-community", "Community cloud — serverless GPUs", "community"),
     ):
         filtered = filter_serverless_cloud_rows(
             rows,

@@ -284,7 +284,8 @@ class PipelineS3FlowTests(unittest.TestCase):
         self.assertTrue(any("kept for retry" in line for line in logs))
         failure = json.loads((self.job_dir / "highlights" / "en" / "language_status.json").read_text(encoding="utf-8"))
         self.assertEqual(failure["status"], "failed")
-        self.assertIn("worker crashed", failure["message"])
+        self.assertNotIn("worker crashed", failure["message"], "the user must not see the worker error")
+        self.assertTrue(any("worker crashed" in line for line in logs), "the detail stays in the log for debugging")
 
     def test_upload_failure_does_not_start_remote_job_or_render_locally(self):
         client = FakeS3Client(fail_upload=True)

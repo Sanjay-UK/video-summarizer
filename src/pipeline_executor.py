@@ -1,7 +1,7 @@
 """Hybrid local/RunPod execution for heavy vs light pipeline steps."""
 
 from __future__ import annotations
-from src.log_safety import redact
+from src.log_safety import redact, safe_exc
 
 import json
 import os
@@ -22,6 +22,7 @@ from src.runpod_ssh import (
     sync_project_bundle,
 )
 from src.job_progress import report_stage
+from src.user_messages import GENERIC_HIGHLIGHT_FAILURE
 from src.summary_translate import translate_summary_for_languages
 from src.summarizer import summarize_transcript
 from src.transcriber import transcribe_audio
@@ -70,7 +71,8 @@ def _store_highlights_in_s3(
             log(f"Highlight {lang} stored in S3 (key recorded in {s3.HIGHLIGHT_RECORD_NAME}).")
             kept[lang] = mp4
         else:
-            message = f"Highlight upload to S3 failed ({record.get('error_code', 'error')}); not served from local disk."
+            log(f"Highlight upload failed ({record.get('error_code', 'error')}).")
+            message = "The highlight video could not be saved. Please try again."
             log(message)
             _write_lang_failure(job_output_dir, lang, message, failure_kind="s3_upload")
     return kept
@@ -257,8 +259,8 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
                 video_url = s3_store.presign_get(s3_key)
                 log(f"Source uploaded to S3 (key recorded in {s3.S3_RECORD_NAME}).")
             except Exception as exc:
-                message = f"Source upload to S3 failed ({type(exc).__name__}); remote highlight was not started."
-                log(message)
+                log(f"Source upload failed ({type(exc).__name__}); highlight processing was not started.")
+                message = "The source video could not be prepared for highlight rendering. Please try again."
                 for lang in languages:
                     _write_lang_failure(job_output_dir, lang, message, failure_kind="s3_upload")
                 return {}
@@ -279,8 +281,9 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
         except Exception as exc:
             # No silent local fallback: a locally rendered video must never be reported as a worker result.
             # Each requested language is recorded as failed, so the UI and status show the real outcome.
-            message = f"RunPod worker highlight failed: {exc}"
-            log(message)
+            # The raw error is logged for debugging; the user sees a neutral message.
+            log(f"Highlight processing failed: {safe_exc(exc)}")
+            message = GENERIC_HIGHLIGHT_FAILURE
             if s3_key and s3_store is not None:
                 # Keep the source so a retry can reuse it; the key is recorded for manual cleanup.
                 _mark_s3_retained(job_output_dir, s3_key, log)
@@ -304,8 +307,8 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
                 paths[lang] = mp4
         missing = [lang for lang in languages if lang not in paths]
         for lang in missing:
-            message = "RunPod worker returned no highlight file for this language."
-            log(message)
+            log(f"No highlight file was returned for {lang}.")
+            message = GENERIC_HIGHLIGHT_FAILURE
             _write_lang_failure(job_output_dir, lang, message, failure_kind="runpod_worker")
         if s3_store is not None and paths:
             paths = _store_highlights_in_s3(job_output_dir, paths, s3_store, log)

@@ -167,7 +167,7 @@ def apply_registry_image(image: str) -> dict[str, Any]:
             "ok": False,
             "error": (
                 "Registry image must look like docker.io/user/repo:tag (include a /). "
-                "RunPod Hub one-click deploy creates an endpoint in the console; "
+                "The hub one-click deploy creates an endpoint in your cloud console; "
                 "to use an image with this app, copy the container image from that endpoint "
                 "or build from runpod_worker/Dockerfile via Hub/GitHub."
             ),

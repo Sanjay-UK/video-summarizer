@@ -34,7 +34,7 @@
   </dl>
   {% if ds.console_url %}
   <div class="deploy-summary-actions">
-    <a href="{{ ds.console_url }}" target="_blank" rel="noopener">Open RunPod</a>
+    <a href="{{ ds.console_url }}" target="_blank" rel="noopener">Open cloud console</a>
   </div>
   {% endif %}
 
@@ -44,13 +44,13 @@
       {% if ds.endpoint_id %}<li><span class="deploy-status-k">Endpoint ID</span> <code>{{ ds.endpoint_id }}</code></li>{% endif %}
       {% if ds.network_volume_id %}<li><span class="deploy-status-k">Network volume</span> <code>{{ ds.network_volume_id }}</code></li>{% endif %}
       {% if ds.pod_id %}<li><span class="deploy-status-k">Pod ID</span> <code>{{ ds.pod_id }}</code></li>{% endif %}
-      {% if ds.runpod_live_status %}<li><span class="deploy-status-k">RunPod status</span> {{ ds.runpod_live_status }}</li>{% endif %}
+      {% if ds.runpod_live_status %}<li><span class="deploy-status-k">Live status</span> {{ ds.runpod_live_status }}</li>{% endif %}
       {% if ds.serverless_idle_timeout_sec is not none %}<li><span class="deploy-status-k">Idle timeout</span> {{ ds.serverless_idle_timeout_sec }} s</li>{% endif %}
       {% if ds.last_delay_time_ms is not none %}<li><span class="deploy-status-k">Last delayTime</span> {{ ds.last_delay_time_ms }} ms</li>{% endif %}
       {% if ds.last_execution_time_ms is not none %}<li><span class="deploy-status-k">Last executionTime</span> {{ ds.last_execution_time_ms }} ms</li>{% endif %}
       {% if ds.warmup_status %}<li><span class="deploy-status-k">Warmup</span> {{ ds.warmup_status }}</li>{% endif %}
       {% if ds.deploy_message %}<li><span class="deploy-status-k">Last deploy</span> {{ ds.deploy_message }}</li>{% endif %}
-      {% if ds.runpod_error %}<li class="deploy-status-warn">{{ ds.runpod_error }}</li>{% endif %}
+      {% if ds.runpod_error %}<li class="deploy-status-warn">Live status could not be read. Details are in the server log.</li>{% endif %}
       {% if ds.ssh_command %}<li><span class="deploy-status-k">SSH</span> <code class="deploy-ssh-cmd">{{ ds.ssh_command }}</code></li>{% endif %}
       {% if ds.idle_auto_stop_note %}<li class="deploy-status-warn"><span class="deploy-status-k">Idle stop</span> {{ ds.idle_auto_stop_note }}{% if ds.idle_monitor_url %} <a href="{{ ds.idle_monitor_url }}" target="_blank" rel="noopener">Idle monitor</a>{% endif %}</li>{% endif %}
       {% if ds.spend_cap_note %}<li class="deploy-status-warn"><span class="deploy-status-k">Spend limits</span> {{ ds.spend_cap_note }}{% if ds.billing_docs_url %} <a href="{{ ds.billing_docs_url }}" target="_blank" rel="noopener">Billing docs</a>{% endif %}</li>{% endif %}
