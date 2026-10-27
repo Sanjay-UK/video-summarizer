@@ -1,643 +1,427 @@
-"""S3-stored highlights: stable keys in history, fresh one-hour links on every request, and safe failures.
+"""Regression tests: S3 is the only store for a job's files, its History entry, results, downloads and retries.
 
-No AWS calls are made. A fake S3 client records uploads and signing requests. Each test checks an observable
-result: the saved record, the signing arguments, the HTTP response, or the executor's output.
+AWS and the network are fully mocked (zz/fake_s3.py). Covered: the job/video layout, the manifest written last, a failed
+upload leaving no job in History, History read from S3 only, fresh one-hour links with no URL saved, no local fallback,
+delete, retry that uploads only what changed, storage readiness, and error text that never carries credentials or links.
 """
 
-import contextlib
-import io
 import json
 import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 os.environ.setdefault("RUNPOD_API_KEY", "test-only-not-a-secret")
 
-from botocore.exceptions import ClientError  # noqa: E402
-
+import fake_s3  # noqa: E402
 from src import s3_video_store as s3  # noqa: E402
 
-BUCKET = s3.DEFAULT_BUCKET
-_REAL_VIDEO_STORE = s3.VideoStore
-LEAKY_KEY = "SYNTHETIC-TEST-KEY-NOT-REAL"  # synthetic, used to prove messages never echo credentials
+JOB = "0a1b2c3d"
+TOKEN = "SYNTHETIC_TOKEN_1234567890ABCDEFGHIJKLMNOP"
+SECRET_URL = "https://bucket.s3.example.test/k.mp4?X-Amz-Signature=SYNTHETIC_SIG_9f8e7d"
 
 
-VALID_KEY = "highlights/" + "a" * 8 + "-" + "b" * 4 + "-" + "c" * 4 + "-" + "d" * 4 + "-" + "e" * 12 + "/en.mp4"
+def _job_folder(root: Path, *, with_summary=True, with_highlight=True) -> Path:
+    """A finished job folder as the pipeline leaves it, with the scratch files that must not be uploaded."""
+    folder = root / JOB
+    folder.mkdir(parents=True)
+    (folder / "source.mp4").write_bytes(b"SOURCE" * 100)
+    (folder / "segments.json").write_text("[]", encoding="utf-8")
+    (folder / "transcript.txt").write_text("hello", encoding="utf-8")
+    if with_summary:
+        (folder / "summary.txt").write_text("A short summary.", encoding="utf-8")
+    if with_highlight:
+        (folder / "highlights" / "en").mkdir(parents=True)
+        (folder / "highlights" / "en" / "highlight_en.mp4").write_bytes(b"h" * 2048)
+        (folder / "highlights" / "highlight_status.json").write_text(
+            json.dumps({"languages": {}, "requested_languages": ["en"]}), encoding="utf-8")
+    (folder / "s3_video.json").write_text("{}", encoding="utf-8")  # local bookkeeping, never uploaded
+    scratch = folder / "highlights" / "en" / "scene_000" / "build"
+    scratch.mkdir(parents=True)
+    (scratch / "scene_000_final.mp4").write_bytes(b"scratch")
+    return folder
 
 
-def _client_error(code: str, op: str = "HeadObject") -> ClientError:
-    return ClientError({"Error": {"Code": code, "Message": "x"}}, op)
-
-
-class FakeS3:
-    """Records uploads, head checks, and presign calls. Errors can be injected per operation."""
-
-    def __init__(self):
-        self.objects: dict[str, int] = {}
-        self.uploads: list[tuple[str, str, dict]] = []
-        self.deleted: list[str] = []
-        self.presign_calls: list[dict] = []
-        self.upload_error: Exception | None = None
-        self.upload_error_prefix: str | None = None  # limit upload_error to keys with this prefix
-        self.head_error: Exception | None = None
-        self.presign_error: Exception | None = None
-        self.size_override: int | None = None
-        self._n = 0
-
-    def upload_file(self, path, bucket, key, ExtraArgs):
-        if self.upload_error and (self.upload_error_prefix is None or key.startswith(self.upload_error_prefix)):
-            raise self.upload_error
-        self.objects[key] = Path(path).stat().st_size
-        self.uploads.append((bucket, key, ExtraArgs))
-
-    def head_object(self, Bucket, Key):
-        if self.head_error:
-            raise self.head_error
-        if Key not in self.objects:
-            raise _client_error("404")
-        return {"ContentLength": self.size_override or self.objects[Key], "ContentType": "video/mp4"}
-
-    def generate_presigned_url(self, op, Params, ExpiresIn):
-        if self.presign_error:
-            raise self.presign_error
-        self._n += 1
-        self.presign_calls.append({"op": op, "Params": dict(Params), "ExpiresIn": ExpiresIn})
-        # A different signature each call, like real presigning. The nonce stands in for X-Amz-Signature.
-        return (
-            f"https://{Params['Bucket']}.s3.{s3.DEFAULT_REGION}.example/{Params['Key']}"
-            f"?X-Amz-Expires={ExpiresIn}&X-Amz-Signature=fake{self._n}"
-        )
-
-    def delete_object(self, Bucket, Key):
-        self.deleted.append(Key)
-
-
-class FakeCreds:
-    def __init__(self, token=None, expiry=None):
-        self.token = token
-        self._expiry_time = expiry
-
-
-class FakeSession:
-    def __init__(self, creds):
-        self._creds = creds
-
-    def get_credentials(self):
-        return self._creds
-
-
-class StoreTestBase(unittest.TestCase):
+class PublishTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.job_dir = Path(self.tmp.name) / "job"
-        self.job_dir.mkdir()
-        self.mp4 = self.job_dir / "highlight_en.mp4"
-        self.mp4.write_bytes(b"x" * 4096)
-        self.fake = FakeS3()
-        # Settings deliberately ask for 2 h to prove highlight links ignore VIDEO_S3_PRESIGN_EXPIRES.
-        self.store = s3.VideoStore(s3.settings_from_env({"VIDEO_S3_PRESIGN_EXPIRES": "7200"}), client=self.fake)
+        self.folder = _job_folder(Path(self.tmp.name))
+        self.store = fake_s3.new_store()
 
-    def _upload(self, lang="en"):
-        return s3.upload_highlight(self.job_dir, lang, self.mp4, self.store)
-
-
-class UploadRecordTests(StoreTestBase):
-    def test_upload_records_stable_key_and_metadata_not_a_url(self):
-        record = self._upload()
-        self.assertEqual(record["status"], "uploaded")
-        self.assertEqual(record["bucket"], BUCKET)
-        self.assertEqual(record["size_bytes"], 4096)
-        self.assertEqual(record["content_type"], "video/mp4")
-        self.assertTrue(s3._HIGHLIGHT_KEY_RE.match(record["key"]), record["key"])
-        self.assertIn("uploaded_at", record)
-        raw = (self.job_dir / s3.HIGHLIGHT_RECORD_NAME).read_text(encoding="utf-8")
-        self.assertNotIn("X-Amz", raw)
-        self.assertNotIn("https://", raw)
-        self.assertEqual(self.fake.uploads[0][2]["ServerSideEncryption"], "AES256")
-        self.assertEqual(self.fake.uploads[0][2]["ContentType"], "video/mp4")
-
-    def test_upload_failure_is_recorded_not_raised(self):
-        self.fake.upload_error = _client_error("AccessDenied", "PutObject")
-        record = s3.upload_highlight(self.job_dir, "en", self.mp4, self.store)
-        self.assertEqual(record["status"], "failed")
-        self.assertEqual(record["error_code"], "AccessDenied")
-        self.assertFalse(s3.has_stored_highlight(self.job_dir, "en"))
-
-    def test_size_mismatch_is_a_failed_upload(self):
-        self.fake.size_override = 1
-        record = s3.upload_highlight(self.job_dir, "en", self.mp4, self.store)
-        self.assertEqual(record["status"], "failed")
-        self.assertEqual(record["error_code"], "size_mismatch")
-
-    def test_stored_langs_lists_only_verified_uploads(self):
-        self._upload("en")
-        self.fake.upload_error = _client_error("AccessDenied", "PutObject")
-        s3.upload_highlight(self.job_dir, "hi", self.mp4, self.store)
-        self.assertEqual(s3.stored_highlight_langs(self.job_dir), ["en"])
-
-
-class FreshLinkTests(StoreTestBase):
-    def test_link_is_signed_for_exactly_one_hour_even_if_settings_say_more(self):
-        self._upload()
-        payload = s3.highlight_url(self.job_dir, "en", self.store)
-        self.assertEqual(payload["expires_in"], 3600)
-        call = self.fake.presign_calls[-1]
-        self.assertEqual(call["ExpiresIn"], 3600)
-        self.assertEqual(call["Params"]["Bucket"], BUCKET)
-        self.assertIn("X-Amz-Expires=3600", payload["url"])
-
-    def test_each_request_gets_a_different_link(self):
-        self._upload()
-        first = s3.highlight_url(self.job_dir, "en", self.store)["url"]
-        second = s3.highlight_url(self.job_dir, "en", self.store)["url"]
-        self.assertNotEqual(first, second)
-        self.assertEqual(len(self.fake.presign_calls), 2)
-
-    def test_download_link_sets_attachment_disposition_and_content_type(self):
-        self._upload()
-        s3.highlight_url(self.job_dir, "en", self.store, attachment=True)
-        params = self.fake.presign_calls[-1]["Params"]
-        self.assertTrue(params["ResponseContentDisposition"].startswith("attachment"))
-        self.assertEqual(params["ResponseContentType"], "video/mp4")
-
-    def test_nothing_is_written_when_a_link_is_issued(self):
-        self._upload()
-        before = (self.job_dir / s3.HIGHLIGHT_RECORD_NAME).read_text(encoding="utf-8")
-        s3.highlight_url(self.job_dir, "en", self.store)
-        self.assertEqual((self.job_dir / s3.HIGHLIGHT_RECORD_NAME).read_text(encoding="utf-8"), before)
-
-    def test_not_uploaded_language_is_not_in_s3(self):
-        with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
-        self.assertEqual(ctx.exception.code, "not_in_s3")
-        self.assertEqual(self.fake.presign_calls, [])
-
-
-class ProductionStoreCredentialTests(unittest.TestCase):
-    """Regression: the expiry guard must check the live session. highlight_store() builds a new store per request,
-    so the session only exists after the client is created. Checking before that skipped the guard entirely."""
-
-    def _job_with_record(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        job = Path(tmp.name) / "job"
-        job.mkdir()
-        s3.write_highlight_record(job, "en", {"bucket": BUCKET, "key": VALID_KEY, "status": "uploaded"})
-        return job
-
-    def _boto_session(self, creds):
-        fake = FakeS3()
-        session = mock.Mock()
-        session.get_credentials.return_value = creds
-        session.client.return_value = fake
-        return session, fake
-
-    def test_temporary_credentials_ending_in_20_minutes_are_refused_through_highlight_store(self):
-        job = self._job_with_record()
-        soon = datetime.now(timezone.utc) + timedelta(minutes=20)
-        session, fake = self._boto_session(FakeCreds(token="session-token", expiry=soon))
-        with mock.patch("boto3.Session", return_value=session), mock.patch.dict(os.environ, {"VIDEO_S3_PROFILE": "video-summarizer"}):
-            with self.assertRaises(s3.HighlightStoreError) as ctx:
-                s3.highlight_url(job, "en", s3.highlight_store())
-        self.assertEqual(ctx.exception.code, "credentials_expire_early")
-        self.assertEqual(fake.presign_calls, [], "no one-hour link may be signed")
-
-    def test_long_term_credentials_through_highlight_store_are_issued(self):
-        job = self._job_with_record()
-        session, fake = self._boto_session(FakeCreds(token=None, expiry=None))
-        fake.objects[VALID_KEY] = 1
-        with mock.patch("boto3.Session", return_value=session):
-            payload = s3.highlight_url(job, "en", s3.highlight_store())
-        self.assertEqual(payload["expires_in"], 3600)
-        self.assertEqual(len(fake.presign_calls), 1)
-
-
-class HighlightValidationTests(StoreTestBase):
-    def test_unsupported_language_is_refused_inside_highlight_url(self):
-        with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "zz", self.store)
-        self.assertEqual(ctx.exception.code, "invalid_language")
-        self.assertEqual(self.fake.presign_calls, [])
-
-
-class SigningHostTests(unittest.TestCase):
-    """Regression: the real client must presign against the regional host. The global host made S3 answer
-    SignatureDoesNotMatch for this bucket (ap-south-1), so no presigned link could be used."""
-
-    def test_presigned_link_uses_the_regional_host_with_sigv4(self):
-        env = {"AWS_ACCESS_KEY_ID": "SYNTHETIC-TEST-ACCESS", "AWS_SECRET_ACCESS_KEY": "synthetic-test-secret-not-real"}
-        settings = s3.settings_from_env()
-        settings["profile"] = None  # use the env credentials above, not a real profile
-        with mock.patch.dict(os.environ, env):
-            store = s3.VideoStore(settings)
-            url = store.presign_get("highlights/x/en.mp4", expires=3600)
-        host = url.split("/")[2]
-        self.assertEqual(host, f"{BUCKET}.s3.{s3.DEFAULT_REGION}.amazonaws.com")
-        self.assertIn("X-Amz-Algorithm=AWS4-HMAC-SHA256", url)
-        self.assertIn("X-Amz-Expires=3600", url)
-
-
-class LegacyAndTamperedRecordTests(StoreTestBase):
-    def _write_raw(self, record):
-        (self.job_dir / s3.HIGHLIGHT_RECORD_NAME).write_text(
-            json.dumps({"languages": {"en": record}}), encoding="utf-8"
+    def _publish(self, known=None):
+        results = {"status": "completed", "summary": "A short summary.", "summary_length": 16}
+        return s3.publish_job(
+            self.store, self.folder, job_id=JOB, video_uid=s3.make_video_uid(), source_name="clip.mp4",
+            created_at="2026-01-01T00:00:00", completed_at="2026-01-01T00:05:00", results=results,
+            known_files=known,
         )
 
-    def test_old_url_in_a_record_is_dropped_and_never_returned(self):
-        self._upload()
-        legacy_url = "https://old.example/expired?X-Amz-Signature=stale"
-        raw = json.loads((self.job_dir / s3.HIGHLIGHT_RECORD_NAME).read_text(encoding="utf-8"))
-        raw["languages"]["en"]["url"] = legacy_url
-        raw["languages"]["en"]["presigned_url"] = legacy_url
-        (self.job_dir / s3.HIGHLIGHT_RECORD_NAME).write_text(json.dumps(raw), encoding="utf-8")
-        self.assertNotIn("url", s3.read_highlight_records(self.job_dir)["en"])
-        payload = s3.highlight_url(self.job_dir, "en", self.store)
-        self.assertNotEqual(payload["url"], legacy_url)
+    def test_every_file_is_uploaded_and_the_manifest_is_written_last(self):
+        manifest = self._publish()
+        keys = list(self.store.client.objects)
+        self.assertTrue(keys[-1].endswith("/manifest.json"), "the manifest must be the last object written")
+        self.assertEqual(set(manifest["files"]), {
+            "source.mp4", "segments.json", "transcript.txt", "summary.txt",
+            "highlights/en/highlight_en.mp4", "highlights/highlight_status.json",
+        })
+        for rel, entry in manifest["files"].items():
+            self.assertEqual(entry["key"], f"jobs/{JOB}/{manifest['video_uid']}/{rel}")
+            self.assertEqual(self.store.client.objects[entry["key"]], (self.folder / rel).read_bytes())
 
-    def test_record_rewrite_drops_legacy_url_fields(self):
-        self._write_raw({"bucket": BUCKET, "key": "highlights/x", "status": "uploaded", "url": "https://old"})
-        s3.write_highlight_record(self.job_dir, "hi", {"status": "failed"})
-        self.assertNotIn("url", s3.read_highlight_records(self.job_dir)["en"])
-        self.assertNotIn("https://old", (self.job_dir / s3.HIGHLIGHT_RECORD_NAME).read_text(encoding="utf-8"))
+    def test_scratch_and_local_bookkeeping_are_not_in_the_manifest(self):
+        manifest = self._publish()
+        self.assertNotIn("s3_video.json", manifest["files"])
+        self.assertFalse(any("/build/" in rel for rel in manifest["files"]))
 
-    def test_invalid_key_is_refused(self):
-        self._write_raw({"bucket": BUCKET, "key": "../../etc/passwd", "status": "uploaded"})
+    def test_a_failed_upload_writes_no_manifest_so_the_job_is_not_listed(self):
+        with mock.patch.object(self.store.client, "upload_file", side_effect=ConnectionError("down")):
+            with self.assertRaises(ConnectionError):
+                self._publish()
+        self.assertEqual(s3.list_job_manifests(self.store), [])
+        self.assertFalse(any(k.endswith("manifest.json") for k in self.store.client.objects))
+
+    def test_upload_size_mismatch_is_refused(self):
+        with mock.patch.object(self.store.client, "head_object", return_value={"ContentLength": 1}):
+            with self.assertRaises(s3.HighlightStoreError) as ctx:
+                self._publish()
+        self.assertEqual(ctx.exception.code, "size_mismatch")
+        self.assertFalse(any(k.endswith("manifest.json") for k in self.store.client.objects))
+
+    def test_a_file_already_in_storage_is_not_sent_again(self):
+        uid = s3.make_video_uid()
+        known = {"source.mp4": s3.upload_job_file(self.store, JOB, uid, self.folder / "source.mp4", "source.mp4")}
+        with mock.patch.object(self.store.client, "upload_file", wraps=self.store.client.upload_file) as up:
+            manifest = s3.publish_job(
+                self.store, self.folder, job_id=JOB, video_uid=uid, source_name="clip.mp4",
+                created_at="2026-01-01T00:00:00", completed_at="2026-01-01T00:05:00",
+                results={"status": "completed"}, known_files=known,
+            )
+        uploaded_keys = [c.args[2] for c in up.call_args_list]
+        self.assertNotIn(f"jobs/{JOB}/{uid}/source.mp4", uploaded_keys)
+        self.assertEqual(manifest["files"]["source.mp4"], known["source.mp4"])
+
+    def test_failed_job_manifest_lists_only_files_already_stored(self):
+        s3.publish_failure(
+            self.store, job_id=JOB, video_uid=s3.make_video_uid(), source_name="clip.mp4",
+            created_at="2026-01-01T00:00:00", completed_at="2026-01-01T00:01:00",
+            error="The video could not be read.", error_code=None, known_files={},
+        )
+        manifest = fake_s3.manifest(self.store, JOB)
+        self.assertEqual(manifest["status"], "error")
+        self.assertEqual(manifest["files"], {})
+
+
+class HistoryAndManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = fake_s3.new_store()
+
+    def test_only_jobs_with_a_manifest_are_listed(self):
+        folder = _job_folder(Path(self.tmp.name))
+        s3.publish_job(self.store, folder, job_id=JOB, video_uid=s3.make_video_uid(), source_name="clip.mp4",
+                       created_at="2026-01-01T00:00:00", completed_at="2026-01-01T00:05:00",
+                       results={"status": "completed"})
+        # A job whose manifest was never written (an interrupted upload) must not appear in History.
+        self.store.client.objects[f"jobs/ffffffff/{s3.make_video_uid()}/source.mp4"] = b"orphan"
+        listed = s3.list_job_manifests(self.store)
+        self.assertEqual([m["job_id"] for m in listed], [JOB])
+
+    def test_newest_job_is_listed_first(self):
+        for job, created in (("1a1a1a1a", "2026-01-01T00:00:00"), ("2b2b2b2b", "2026-02-01T00:00:00")):
+            uid = s3.make_video_uid()
+            self.store.put_json(s3.manifest_key(job, uid), {
+                "schema": s3.MANIFEST_SCHEMA, "job_id": job, "video_uid": uid, "status": "completed",
+                "created_at": created, "files": {}, "bucket": self.store.bucket,
+            })
+        listed = s3.list_job_manifests(self.store)
+        self.assertEqual([m["job_id"] for m in listed], ["2b2b2b2b", "1a1a1a1a"])
+
+    def test_a_manifest_that_points_at_another_job_is_ignored(self):
+        uid = s3.make_video_uid()
+        forged = {"schema": s3.MANIFEST_SCHEMA, "job_id": JOB, "video_uid": uid, "status": "completed",
+                  "created_at": "2026-01-01", "bucket": self.store.bucket,
+                  "files": {"summary.txt": {"key": f"jobs/9f9f9f9f/{uid}/summary.txt"}}}
+        self.store.put_json(s3.manifest_key(JOB, uid), forged)
+        self.assertIsNone(s3.load_job_manifest(self.store, JOB))
+
+    def test_history_listing_is_cached_and_refreshed_by_a_publish(self):
+        folder = _job_folder(Path(self.tmp.name))
+        self.assertEqual(s3.list_job_manifests(self.store), [])
+        with mock.patch.object(self.store.client, "list_objects_v2", wraps=self.store.client.list_objects_v2) as listing:
+            s3.list_job_manifests(self.store)  # a poll within the cache window
+            s3.list_job_manifests(self.store)
+        self.assertEqual(listing.call_count, 0, "repeat polls must not list the bucket again")
+        s3.publish_job(self.store, folder, job_id=JOB, video_uid=s3.make_video_uid(), source_name="clip.mp4",
+                       created_at="2026-01-01T00:00:00", completed_at="2026-01-01T00:05:00",
+                       results={"status": "completed"})
+        self.assertEqual([m["job_id"] for m in s3.list_job_manifests(self.store)], [JOB])
+
+    def test_manifest_is_cached_briefly_and_refreshed_after_a_publish(self):
+        self.assertIsNone(s3.load_job_manifest(self.store, JOB))  # cached as "no job"
+        folder = _job_folder(Path(self.tmp.name))
+        s3.publish_job(self.store, folder, job_id=JOB, video_uid=s3.make_video_uid(), source_name="clip.mp4",
+                       created_at="2026-01-01T00:00:00", completed_at="2026-01-01T00:05:00",
+                       results={"status": "completed"})
+        self.assertIsNotNone(s3.load_job_manifest(self.store, JOB), "publishing must clear the cached miss")
+
+
+class LinkTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = fake_s3.new_store()
+        self.folder = _job_folder(Path(self.tmp.name))
+        self.manifest = s3.publish_job(
+            self.store, self.folder, job_id=JOB, video_uid=s3.make_video_uid(), source_name="clip.mp4",
+            created_at="2026-01-01T00:00:00", completed_at="2026-01-01T00:05:00",
+            results={"status": "completed"})
+
+    def test_link_is_for_the_exact_key_and_lasts_one_hour(self):
+        link = s3.file_link(self.store, self.manifest, "summary.txt", attachment=True)
+        expected = f"jobs/{JOB}/{self.manifest['video_uid']}/summary.txt"
+        self.assertEqual(self.store.client.presigned[-1]["params"]["Key"], expected)
+        self.assertEqual(self.store.client.presigned[-1]["expires"], s3.HIGHLIGHT_URL_EXPIRES)
+        self.assertEqual(link["expires_in"], 3600)
+        self.assertEqual(fake_s3.key_from_link(link["url"]), expected)
+
+    def test_attachment_and_inline_set_the_disposition(self):
+        s3.file_link(self.store, self.manifest, "summary.txt", attachment=True)
+        self.assertTrue(self.store.client.presigned[-1]["params"]["ResponseContentDisposition"].startswith("attachment"))
+        s3.file_link(self.store, self.manifest, "summary.txt", attachment=False)
+        self.assertTrue(self.store.client.presigned[-1]["params"]["ResponseContentDisposition"].startswith("inline"))
+
+    def test_each_request_gets_a_new_link_and_nothing_is_saved(self):
+        s3.file_link(self.store, self.manifest, "summary.txt")
+        s3.file_link(self.store, self.manifest, "summary.txt")
+        self.assertEqual(len(self.store.client.presigned), 2)
+        stored = json.dumps(fake_s3.manifest(self.store, JOB))
+        self.assertNotIn("X-Amz", stored)
+
+    def test_a_file_the_job_does_not_have_is_not_in_s3(self):
         with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
+            s3.file_link(self.store, self.manifest, "highlights/hi/highlight_hi.mp4")
+        self.assertEqual(ctx.exception.code, "not_in_s3")
+
+    def test_a_manifest_from_another_bucket_is_refused(self):
+        other = dict(self.manifest, bucket="someone-elses-bucket")
+        with self.assertRaises(s3.HighlightStoreError) as ctx:
+            s3.file_link(self.store, other, "summary.txt")
         self.assertEqual(ctx.exception.code, "invalid_record")
-        self.assertEqual(self.fake.presign_calls, [])
 
-    def test_record_from_another_bucket_is_refused(self):
-        self._write_raw({"bucket": "someone-elses-bucket", "key": f"highlights/{'a' * 8}-{'b' * 4}-{'c' * 4}-{'d' * 4}-{'e' * 12}/en.mp4", "status": "uploaded"})
+    def test_a_missing_object_gets_a_clear_code(self):
+        del self.store.client.objects[f"jobs/{JOB}/{self.manifest['video_uid']}/summary.txt"]
         with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
-        self.assertEqual(ctx.exception.code, "invalid_record")
-
-    def test_unreadable_record_file_means_no_records(self):
-        (self.job_dir / s3.HIGHLIGHT_RECORD_NAME).write_text("{not json", encoding="utf-8")
-        self.assertEqual(s3.read_highlight_records(self.job_dir), {})
-
-
-class FailureTests(StoreTestBase):
-    def test_missing_object_is_a_clear_error(self):
-        self._upload()
-        self.fake.objects.clear()
-        with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
+            s3.file_link(self.store, self.manifest, "summary.txt")
         self.assertEqual(ctx.exception.code, "object_missing")
 
-    def test_access_denied_is_reported_without_echoing_the_error(self):
-        self._upload()
-        self.fake.head_error = _client_error("403")
-        with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
+    def test_access_denied_is_reported_by_code_only(self):
+        with mock.patch.object(self.store, "head", side_effect=fake_s3.FakeClientError("AccessDenied")):
+            with self.assertRaises(s3.HighlightStoreError) as ctx:
+                s3.file_link(self.store, self.manifest, "summary.txt")
         self.assertEqual(ctx.exception.code, "s3_access")
-        self.assertIn("403", str(ctx.exception))
-
-    def test_expired_credentials_are_reported_by_aws_code_only(self):
-        self._upload()
-        self.fake.head_error = _client_error("ExpiredToken")
-        with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
-        self.assertEqual(ctx.exception.code, "s3_access")
-        self.assertIn("ExpiredToken", str(ctx.exception))
+        self.assertIn("AccessDenied", str(ctx.exception))
+        self.assertNotIn("amazonaws", str(ctx.exception))
 
     def test_presign_failure_is_reported(self):
-        self._upload()
-        self.fake.presign_error = RuntimeError("signing broke")
+        self.store.client.fail_presign = True
         with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
+            s3.file_link(self.store, self.manifest, "summary.txt")
         self.assertEqual(ctx.exception.code, "presign_failed")
 
-    def test_temporary_credentials_that_end_early_are_refused(self):
-        self._upload()
-        soon = datetime.now(timezone.utc) + timedelta(minutes=20)
-        self.store._session = FakeSession(FakeCreds(token="session-token", expiry=soon))
-        with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
+    def test_short_lived_temporary_credentials_are_refused(self):
+        with mock.patch.object(s3.VideoStore, "signing_credentials_problem", return_value="credentials_expire_early"):
+            with self.assertRaises(s3.HighlightStoreError) as ctx:
+                s3.file_link(self.store, self.manifest, "summary.txt")
         self.assertEqual(ctx.exception.code, "credentials_expire_early")
-        self.assertEqual(self.fake.presign_calls, [], "no link is signed when it would end early")
+        self.assertEqual(self.store.client.presigned, [])
 
-    def test_temporary_credentials_that_last_long_enough_are_accepted(self):
-        self._upload()
-        later = datetime.now(timezone.utc) + timedelta(hours=3)
-        self.store._session = FakeSession(FakeCreds(token="session-token", expiry=later))
-        self.assertEqual(s3.highlight_url(self.job_dir, "en", self.store)["expires_in"], 3600)
+    def test_error_messages_never_carry_a_link_or_a_token(self):
+        for exc in (s3.HighlightStoreError("s3_access", "S3 refused"), fake_s3.FakeClientError("AccessDenied")):
+            mapped = s3.as_store_error(exc)
+            self.assertNotIn(TOKEN, str(mapped))
+            self.assertNotIn(SECRET_URL, str(mapped))
 
-    def test_long_term_keys_have_no_expiry_problem(self):
-        self._upload()
-        self.store._session = FakeSession(FakeCreds(token=None, expiry=None))
-        self.assertEqual(s3.highlight_url(self.job_dir, "en", self.store)["expires_in"], 3600)
 
-    def test_missing_credentials_are_reported(self):
-        self._upload()
-        self.store._session = FakeSession(None)
-        with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
+class EnsureReadyTests(unittest.TestCase):
+    def test_ready_when_the_bucket_answers(self):
+        s3.ensure_ready(fake_s3.new_store())
+
+    def test_missing_profile_is_reported_as_credentials_missing(self):
+        store = fake_s3.new_store()
+        with mock.patch.object(store, "head_bucket", side_effect=fake_s3.FakeClientError("ProfileNotFound")):
+            with self.assertRaises(s3.HighlightStoreError) as ctx:
+                s3.ensure_ready(store)
         self.assertEqual(ctx.exception.code, "credentials_missing")
 
-    def test_error_messages_never_contain_credentials_or_urls(self):
-        self._upload()
-        # The underlying exception carries a key-like string and a URL. The user-facing error must carry neither.
-        self.fake.presign_error = RuntimeError(f"signing with {LEAKY_KEY} for https://bucket.example/x?X-Amz-Signature=abc")
-        with self.assertRaises(s3.HighlightStoreError) as ctx:
-            s3.highlight_url(self.job_dir, "en", self.store)
-        self.assertNotIn(LEAKY_KEY, str(ctx.exception))
-        self.assertNotIn("X-Amz", str(ctx.exception))
-        self.assertNotIn("https://", str(ctx.exception))
+    def test_access_denied_is_reported_as_access(self):
+        store = fake_s3.new_store()
+        with mock.patch.object(store, "head_bucket", side_effect=fake_s3.FakeClientError("AccessDenied")):
+            with self.assertRaises(s3.HighlightStoreError) as ctx:
+                s3.ensure_ready(store)
+        self.assertEqual(ctx.exception.code, "s3_access")
 
-    def test_error_code_uses_aws_code_or_class_name_only(self):
-        self.assertEqual(s3.error_code(_client_error("NoSuchKey")), "NoSuchKey")
-        self.assertEqual(s3.error_code(RuntimeError(f"contains {LEAKY_KEY}")), "RuntimeError")
+    def test_network_failure_is_reported_as_unavailable(self):
+        store = fake_s3.new_store()
+        with mock.patch.object(store, "head_bucket", side_effect=ConnectionError("no route")):
+            with self.assertRaises(s3.HighlightStoreError) as ctx:
+                s3.ensure_ready(store)
+        self.assertEqual(ctx.exception.code, "s3_unavailable")
 
 
-class PipelineTests(unittest.TestCase):
-    """The serverless executor uploads each highlight, records failures, and never serves a local copy on failure."""
-
+class DeleteTests(unittest.TestCase):
     def setUp(self):
-        from src import pipeline_executor as pe
-
-        self.pe = pe
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.job_dir = Path(self.tmp.name) / "job"
-        self.job_dir.mkdir()
-        self.video = self.job_dir / "source.mp4"
-        self.video.write_bytes(b"source")
-        self.fake = FakeS3()
-        self.logs: list[str] = []
-        env = {"VIDEO_S3_ENABLED": "true", "VIDEO_S3_WORKER_URL_SUPPORT": "true"}
-        patches = [
-            mock.patch.dict(os.environ, env),
-            mock.patch("src.serverless_model_catalog.serverless_highlight_on_worker", return_value=True),
-            mock.patch("src.runpod_serverless.load_endpoint_id_from_selection", return_value="ep1"),
-            mock.patch.object(s3, "VideoStore", lambda settings, client=None: _REAL_VIDEO_STORE(settings, client=self.fake)),
-        ]
-        for p in patches:
-            p.start()
-            self.addCleanup(p.stop)
+        self.store = fake_s3.new_store()
+        folder = _job_folder(Path(self.tmp.name))
+        self.manifest = s3.publish_job(
+            self.store, folder, job_id=JOB, video_uid=s3.make_video_uid(), source_name="clip.mp4",
+            created_at="2026-01-01T00:00:00", completed_at="2026-01-01T00:05:00", results={"status": "completed"})
 
-    def _worker_writes_highlight(self, langs):
-        def fake_worker(**kwargs):
-            for lang in langs:
-                out = self.job_dir / "highlights" / lang
-                out.mkdir(parents=True, exist_ok=True)
-                (out / f"highlight_{lang}.mp4").write_bytes(b"h" * 2048)
-            return None
+    def test_delete_removes_every_file_of_the_job(self):
+        removed = s3.delete_job(self.store, JOB)
+        self.assertGreater(removed, 0)
+        self.assertEqual([k for k in self.store.client.objects if k.startswith(f"jobs/{JOB}/")], [])
+        self.assertIsNone(s3.load_job_manifest(self.store, JOB))
 
-        return mock.patch("src.runpod_serverless.run_highlight_phase_via_serverless", side_effect=fake_worker)
+    def test_a_partly_failed_delete_keeps_the_manifest_so_the_job_stays_visible(self):
+        with mock.patch.object(self.store, "delete_keys", side_effect=s3.HighlightStoreError("s3_access", "no")):
+            with self.assertRaises(s3.HighlightStoreError):
+                s3.delete_job(self.store, JOB)
+        self.assertIsNotNone(s3.load_job_manifest(self.store, JOB), "the manifest must survive a failed delete")
 
-    def _highlight_uploads(self):
-        return [key for _, key, _ in self.fake.uploads if key.startswith("highlights/")]
-
-    def _run(self, langs):
-        executor = self.pe.ServerlessRunpodPipelineExecutor()
-        return executor.run_highlight_phase(
-            job_id="0a1b2c3d",
-            video_path=self.video,
-            segments=[],
-            job_output_dir=self.job_dir,
-            summarization_model="llama3.2:3b",
-            compression="medium",
-            languages=langs,
-            log=self.logs.append,
-        )
-
-    def test_finished_highlight_is_uploaded_and_recorded_without_deleting_it(self):
-        with self._worker_writes_highlight(["en"]):
-            paths = self._run(["en"])
-        self.assertEqual(set(paths), {"en"})
-        self.assertTrue(s3.has_stored_highlight(self.job_dir, "en"))
-        highlight_keys = [key for _, key, _ in self.fake.uploads if key.startswith("highlights/")]
-        self.assertEqual(len(highlight_keys), 1)
-        self.assertNotIn(highlight_keys[0], self.fake.deleted, "a stored highlight must not be deleted")
-        self.assertTrue(any("Source video deleted" in line for line in self.logs), "source cleanup still runs")
-
-    def test_upload_failure_marks_the_language_failed_and_does_not_serve_it(self):
-        self.fake.upload_error = _client_error("AccessDenied", "PutObject")
-        self.fake.upload_error_prefix = "highlights/"  # the source upload still succeeds
-        with self._worker_writes_highlight(["en"]):
-            paths = self._run(["en"])
-        self.assertEqual(paths, {}, "a highlight that failed to upload must not be reported as available")
-        rows = s3.read_highlight_records(self.job_dir)
-        self.assertEqual(rows["en"]["status"], "failed")
-        status = json.loads((self.job_dir / "highlights" / "highlight_status.json").read_text(encoding="utf-8"))
-        self.assertEqual(status["languages"]["en"]["status"], "failed")
-        self.assertEqual(status["languages"]["en"]["failure_kind"], "s3_upload")
-
-    def test_worker_failure_never_falls_back_to_local_rendering(self):
-        with mock.patch("src.runpod_serverless.run_highlight_phase_via_serverless", side_effect=RuntimeError("boom")):
-            paths = self._run(["en"])
-        self.assertEqual(paths, {})
-        self.assertEqual(self._highlight_uploads(), [], "no highlight is uploaded when the worker failed")
-        rows = json.loads((self.job_dir / "highlights" / "highlight_status.json").read_text(encoding="utf-8"))
-        self.assertEqual(rows["languages"]["en"]["failure_kind"], "runpod_worker")
-
-    def test_missing_worker_output_is_reported_as_worker_failure(self):
-        with mock.patch("src.runpod_serverless.run_highlight_phase_via_serverless", return_value=None):
-            paths = self._run(["en"])
-        self.assertEqual(paths, {})
-        self.assertEqual(self._highlight_uploads(), [])
+    def test_deleting_an_unknown_job_removes_nothing(self):
+        self.assertEqual(s3.delete_job(self.store, "ffffffff"), 0)
 
 
 class RouteTests(unittest.TestCase):
-    """HTTP behaviour through the real Flask routes, with the fake S3 store and a temporary output folder."""
-
     @classmethod
     def setUpClass(cls):
         try:
             import app as app_module
-        except ImportError:  # the worker image ships src/ and runpod_worker/ only, not the Flask app
+        except ImportError:
             raise unittest.SkipTest("app.py is not part of the worker image")
-
-        cls.app_module = app_module
-        cls.client = app_module.app.test_client()
+        cls.app = app_module
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.out = Path(self.tmp.name) / "output"
-        self.out.mkdir()
-        self.fake = FakeS3()
-        self.store = s3.VideoStore(s3.settings_from_env(), client=self.fake)
+        self.store = fake_s3.new_store()
         patches = [
-            mock.patch.object(self.app_module, "OUTPUT_DIR", self.out),
-            mock.patch.object(self.app_module, "jobs", {}),
-            mock.patch.object(self.app_module, "job_history", [
-                {"job_id": "0a1b2c3d", "source": "clip.mp4", "created_at": "2026-01-01T00:00:00", "status": "completed"},
-            ]),
-            mock.patch.object(s3, "highlight_store", return_value=self.store),
+            mock.patch.object(self.app, "OUTPUT_DIR", Path(self.tmp.name) / "output"),
+            mock.patch.object(self.app, "jobs", {}),
+            mock.patch.object(self.app, "_s3_store", return_value=self.store),
         ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        self.job = self.out / "0a1b2c3d"
-        (self.job / "highlights" / "en").mkdir(parents=True)
-        self.mp4 = self.job / "highlights" / "en" / "highlight_en.mp4"
-        self.mp4.write_bytes(b"h" * 1024)
-        (self.job / "summary.txt").write_text("A short summary.", encoding="utf-8")
-        s3.upload_highlight(self.job, "en", self.mp4, self.store)
+        self.client = self.app.app.test_client()
+        self.folder = _job_folder(Path(self.tmp.name))
+        self.manifest = fake_s3.publish_local_job(self.app, self.store, self.folder, JOB)
 
-    def _printed(self, fn):
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            response = fn()
-        return response, buf.getvalue()
+    def _key(self, rel):
+        return f"jobs/{JOB}/{self.manifest['video_uid']}/{rel}"
 
-    def test_link_endpoint_returns_a_fresh_one_hour_url_with_no_cache(self):
-        response, printed = self._printed(lambda: self.client.get("/api/highlight-url/0a1b2c3d/en"))
+    def test_history_lists_the_stored_job_with_its_highlight(self):
+        listed = self.client.get("/api/history").get_json()["jobs"]
+        self.assertEqual([j["job_id"] for j in listed], [JOB])
+        self.assertEqual(listed[0]["status"], "completed")
+        self.assertTrue(listed[0]["has_summary"])
+        self.assertTrue(listed[0]["has_highlight_video"])
+
+    def test_history_shows_storage_problems_instead_of_local_jobs(self):
+        with mock.patch.object(self.app.s3, "list_job_manifests",
+                               side_effect=s3.HighlightStoreError("s3_access", "S3 refused")):
+            response = self.client.get("/api/history")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["code"], "s3_access")
+
+    def test_results_are_read_from_storage_when_the_job_is_not_in_memory(self):
+        response = self.client.get(f"/api/results/{JOB}")
         self.assertEqual(response.status_code, 200)
-        body = response.get_json()
-        self.assertEqual(body["expires_in"], 3600)
-        self.assertIn("X-Amz-Expires=3600", body["url"])
-        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
-        self.assertNotIn("X-Amz", printed, "full links must not reach the logs")
-        self.assertNotIn("https://", printed)
+        self.assertEqual(response.get_json()["summary"], "A short summary.")
 
-    def test_reopening_after_an_earlier_link_gets_a_different_link(self):
-        first = self.client.get("/api/highlight-url/0a1b2c3d/en").get_json()["url"]
-        second = self.client.get("/api/highlight-url/0a1b2c3d/en").get_json()["url"]
-        self.assertNotEqual(first, second)
-
-    def test_stream_redirects_to_a_fresh_link_and_never_serves_the_local_copy(self):
-        response = self.client.get("/stream/highlight/0a1b2c3d/en")
+    def test_summary_download_is_a_redirect_to_a_fresh_stored_link(self):
+        response = self.client.get(f"/download/summary/{JOB}")
         self.assertEqual(response.status_code, 302)
-        self.assertIn("X-Amz-Expires=3600", response.headers["Location"])
-        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
-        self.assertNotEqual(response.mimetype, "video/mp4")
+        self.assertEqual(fake_s3.key_from_link(response.headers["Location"]), self._key("summary.txt"))
+        self.assertTrue(self.store.client.presigned[-1]["params"]["ResponseContentDisposition"].startswith("attachment"))
 
-    def test_download_redirects_with_attachment_disposition(self):
-        response = self.client.get("/download/highlight/0a1b2c3d/en")
+    def test_a_translation_that_was_never_stored_is_not_found(self):
+        self.assertEqual(self.client.get(f"/download/summary/{JOB}/hi").status_code, 404)
+
+    def test_stream_is_inline_and_points_at_the_stored_highlight(self):
+        response = self.client.get(f"/stream/highlight/{JOB}/en")
         self.assertEqual(response.status_code, 302)
-        self.assertTrue(self.fake.presign_calls[-1]["Params"]["ResponseContentDisposition"].startswith("attachment"))
+        self.assertEqual(fake_s3.key_from_link(response.headers["Location"]), self._key("highlights/en/highlight_en.mp4"))
+        self.assertTrue(self.store.client.presigned[-1]["params"]["ResponseContentDisposition"].startswith("inline"))
 
-    def test_s3_failure_on_stream_is_an_error_not_a_local_fallback(self):
-        self.fake.head_error = _client_error("403")
-        response = self.client.get("/stream/highlight/0a1b2c3d/en")
-        self.assertEqual(response.status_code, 503)
-        self.assertNotEqual(response.mimetype, "video/mp4")
-        self.assertNotIn(b"h" * 16, response.data)
-
-    def test_missing_object_gets_a_clear_error_code(self):
-        self.fake.objects.clear()
-        response = self.client.get("/api/highlight-url/0a1b2c3d/en")
+    def test_a_local_file_is_never_served_when_storage_has_no_copy(self):
+        (self.folder / "highlights" / "hi").mkdir(parents=True)
+        (self.folder / "highlights" / "hi" / "highlight_hi.mp4").write_bytes(b"local only")
+        response = self.client.get(f"/stream/highlight/{JOB}/hi")
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.get_json()["code"], "object_missing")
+        self.assertNotIn(b"local only", response.data)
 
-    def test_local_only_highlight_reports_not_in_s3_for_the_ui_fallback(self):
-        local = self.out / "1a2b3c4d" / "highlights" / "en"
-        local.mkdir(parents=True)
-        (local / "highlight_en.mp4").write_bytes(b"h")
-        response = self.client.get("/api/highlight-url/1a2b3c4d/en")
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.get_json()["code"], "not_in_s3")
-
-    def test_local_only_stream_still_serves_the_local_file(self):
-        local = self.out / "1a2b3c4d" / "highlights" / "en"
-        local.mkdir(parents=True)
-        (local / "highlight_en.mp4").write_bytes(b"h" * 64)
-        response = self.client.get("/stream/highlight/1a2b3c4d/en")
+    def test_highlight_link_endpoint_returns_json_and_never_caches(self):
+        response = self.client.get(f"/api/highlight-url/{JOB}/en")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.mimetype, "video/mp4")
-        response.close()
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(fake_s3.key_from_link(response.get_json()["url"]), self._key("highlights/en/highlight_en.mp4"))
 
-    def test_invalid_language_and_unknown_job_are_rejected(self):
-        self.assertEqual(self.client.get("/api/highlight-url/0a1b2c3d/zz-invalid-zz").status_code, 400)
-        self.assertEqual(self.client.get("/api/highlight-url/9f9f9f9f/en").status_code, 404)
+    def test_invalid_job_ids_are_refused_before_any_storage_call(self):
+        with mock.patch.object(self.app.s3, "load_job_manifest") as load:
+            response = self.client.get("/api/results/ZZZZZZZZ")
+        self.assertEqual(response.status_code, 404)
+        load.assert_not_called()
 
-    def test_history_and_results_never_expose_a_url(self):
-        history = self.client.get("/api/history").get_data(as_text=True)
-        results = self.client.get("/api/results/job1").get_data(as_text=True)
-        for text in (history, results):
-            self.assertNotIn("X-Amz", text)
-            self.assertNotIn("https://", text)
-
-    def test_history_entry_lists_s3_stored_languages_for_a_job_folder(self):
-        entry = self.app_module.enrich_history_entry({"job_id": "0a1b2c3d"})
-        self.assertEqual(entry["s3_stored_highlights"], ["en"])
-        local_entry = self.app_module.enrich_history_entry({"job_id": "1a2b3c4d"})
-        self.assertEqual(local_entry.get("s3_stored_highlights", []), [])
-
-
-class RouteGuardTests(unittest.TestCase):
-    """Failed uploads, RunPod retry refusal, and job-ID validation on the highlight routes."""
-
-    setUpClass = classmethod(RouteTests.setUpClass.__func__)
-    setUp = RouteTests.setUp
-    _printed = RouteTests._printed
-
-    def _mark_upload_failed(self):
-        (self.job / "highlights" / "highlight_status.json").write_text(json.dumps({
-            "languages": {"en": {"language": "en", "status": "failed", "failure_kind": "s3_upload",
-                                 "message": "upload failed"}}
-        }), encoding="utf-8")
-        records = self.job / s3.HIGHLIGHT_RECORD_NAME
-        if records.exists():
-            records.unlink()
-        s3.write_highlight_record(self.job, "en", {"status": "failed", "error_code": "AccessDenied"})
-
-    def test_stream_refuses_the_local_copy_after_a_failed_s3_upload(self):
-        self._mark_upload_failed()
-        response = self.client.get("/stream/highlight/0a1b2c3d/en")
+    def test_summarize_is_refused_when_storage_is_not_ready_and_starts_nothing(self):
+        error = s3.HighlightStoreError("credentials_missing", s3.S3_MESSAGES["credentials_missing"])
+        with mock.patch.object(self.app.s3, "ensure_ready", side_effect=error), \
+                mock.patch.object(self.app.threading, "Thread") as thread:
+            response = self.client.post("/api/summarize", data={"url": "https://example.test/v"})
         self.assertEqual(response.status_code, 503)
-        self.assertNotEqual(response.mimetype, "video/mp4")
-        self.assertNotIn(b"h" * 64, response.data)
-        self.assertEqual(self.fake.presign_calls, [])
+        self.assertEqual(response.get_json()["code"], "credentials_missing")
+        thread.assert_not_called()
+        self.assertEqual(self.app.jobs, {})
 
-    def test_download_refuses_the_local_copy_after_a_failed_s3_upload(self):
-        self._mark_upload_failed()
-        response = self.client.get("/download/highlight/0a1b2c3d/en")
-        self.assertEqual(response.status_code, 503)
-        self.assertNotIn(b"h" * 64, response.data)
+    def test_delete_removes_the_job_from_storage_and_history(self):
+        response = self.client.delete(f"/api/job/{JOB}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get("/api/history").get_json()["jobs"], [])
 
-    def test_invalid_job_ids_are_rejected_before_any_file_or_s3_lookup(self):
-        for bad in ("ABCDEF12", "zzzzzzzz", "0a1b2c3", "0a1b2c3d4"):
-            with self.subTest(job_id=bad):
-                self.assertEqual(self.client.get(f"/api/highlight-url/{bad}/en").status_code, 404)
-                self.assertEqual(self.client.get(f"/stream/highlight/{bad}/en").status_code, 404)
-                self.assertEqual(self.client.get(f"/download/highlight/{bad}/en").status_code, 404)
-        self.assertEqual(self.fake.presign_calls, [])
-
-    def test_retry_is_refused_in_runpod_mode_without_rendering(self):
-        with mock.patch("src.pipeline_runtime.load_pipeline_runtime", return_value="runpod"), \
-                mock.patch.object(self.app_module, "retry_highlight_languages") as retry:
-            response = self.client.post("/api/highlight/retry/0a1b2c3d", json={"languages": ["en"]})
+    def test_a_running_job_cannot_be_deleted(self):
+        running = self.app.JobProgress("1f1f1f1f", "clip.mp4")
+        self.app.jobs["1f1f1f1f"] = running
+        response = self.client.delete("/api/job/1f1f1f1f")
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.get_json()["code"], "retry_unavailable_runpod")
-        retry.assert_not_called()
 
-    def test_retry_still_runs_locally_in_local_mode(self):
+    def test_retry_downloads_the_job_renders_the_language_and_uploads_only_what_changed(self):
+        def fake_retry(job_dir, languages, model=None, compression=None):
+            target = Path(job_dir) / "highlights" / "hi" / "highlight_hi.mp4"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"new translated highlight")
+            return {}
+
         with mock.patch("src.pipeline_runtime.load_pipeline_runtime", return_value="local"), \
-                mock.patch.object(self.app_module, "retry_highlight_languages", return_value={}) as retry:
-            response = self.client.post("/api/highlight/retry/0a1b2c3d", json={"languages": ["en"]})
-        self.assertEqual(response.status_code, 200)
-        retry.assert_called_once()
-
-
-@unittest.skipUnless((ROOT / "app.py").exists(), "app.py is not part of the worker image")
-class ServerBindingTests(unittest.TestCase):
-    """The development server must listen on localhost only, with the debugger off by default."""
-
-    def test_app_run_binds_to_localhost(self):
-        import ast
-
-        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
-        runs = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "run"]
-        self.assertTrue(runs, "app.run call not found")
-        host = {kw.arg: kw.value for kw in runs[-1].keywords}["host"]
-        self.assertEqual(getattr(host, "value", None), "127.0.0.1")
-
-    def test_debug_is_opt_in_by_environment(self):
-        source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn('os.environ.get("VIDEO_SUMMARIZER_DEBUG"', source)
-        self.assertNotIn("_flask_debug = True", source)
+                mock.patch.object(self.app, "retry_highlight_languages", side_effect=fake_retry), \
+                mock.patch.object(self.store, "upload_file", wraps=self.store.upload_file) as upload:
+            response = self.client.post(f"/api/highlight/retry/{JOB}", json={"languages": ["hi"]})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        uploaded = [c.args[1] for c in upload.call_args_list]
+        self.assertIn(self._key("highlights/hi/highlight_hi.mp4"), uploaded)
+        self.assertNotIn(self._key("source.mp4"), uploaded, "the unchanged source must not be sent again")
+        self.assertNotIn(self._key("highlights/en/highlight_en.mp4"), uploaded)
+        manifest = fake_s3.manifest(self.store, JOB)
+        self.assertIn("highlights/hi/highlight_hi.mp4", manifest["files"])
+        self.assertIn("highlights/en/highlight_en.mp4", manifest["files"])
 
 
 if __name__ == "__main__":

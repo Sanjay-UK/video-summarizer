@@ -888,6 +888,10 @@ function loadHistory() {
  .then(r => r.json())
  .then(data => {
  const historyList = document.getElementById('historyList');
+ if (data.error) {
+ historyList.innerHTML = `<div class="history-empty">${escapeHtml(data.error)}</div>`;
+ return;
+ }
  const jobs = data.jobs || [];
 
  if (jobs.length === 0) {
@@ -940,6 +944,30 @@ function formatDuration(startIso, endIso) {
  if (seconds < 60) return `${seconds}s`;
  if (seconds < 3600) return `${Math.round(seconds/60)}m`;
  return `${Math.round(seconds/3600)}h`;
+}
+
+async function deleteCurrentJob() {
+ if (!currentJobId) return;
+ const confirmed = window.confirm(
+ 'Delete this job from storage? Its summary, audio, subtitles and highlight videos will be removed. This cannot be undone.'
+ );
+ if (!confirmed) return;
+ const button = document.getElementById('deleteJobBtn');
+ button.disabled = true;
+ try {
+ const response = await fetch(`${API_BASE}/job/${currentJobId}`, { method: 'DELETE' });
+ const body = await response.json().catch(() => ({}));
+ if (!response.ok) {
+ alert(body.error || `Could not delete this job (HTTP ${response.status}).`);
+ return;
+ }
+ resetForm();
+ loadHistory();
+ } catch (err) {
+ alert('Could not reach the server to delete this job.');
+ } finally {
+ button.disabled = false;
+ }
 }
 
 function loadJobResults(jobId, updateUrl = true) {

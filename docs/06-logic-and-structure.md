@@ -294,7 +294,7 @@ between 256 and 1536 tokens, about 2.5 times the input (`:72`). With `NLLB_VIA_R
   "Try a shorter video or split the lecture" (`:78-127`).
 - **Video** (inline highlight path): re-encode to 480, 360, then 240 pixels high, with CRF 28 to 40 (`:343-383`); otherwise
   fail, with no local render.
-- **Video with S3:** no video bytes are sent; the worker downloads the source with a signed link (`:397-408`).
+- **Video with S3:** when `VIDEO_S3_WORKER_URL_SUPPORT` is on, no video bytes are sent; the worker downloads the source with a signed link (`src/runpod_serverless_payload.py`).
 
 **Worker job routing:** `input.job_type` or `input.phase` selects the work (`runpod_worker/handler.py:202-216`); see
 [05](05-data-and-api.md), section 7.7.
@@ -330,18 +330,28 @@ hours lose their lease (`src/endpoint_capacity.py:13-17`).
 Results are cached for 5 seconds; failed reads are not cached; concurrent requests share one refresh
 (`src/serverless_status_cache.py:15-72`).
 
-## 8.17 S3 retention rules (`src/pipeline_executor.py`, `src/s3_video_store.py`)
+## 8.17 S3 storage rules (`src/s3_video_store.py`, `src/pipeline_executor.py`, `app.py`)
 
-1. **Source video** uploaded to the bucket root under a random name with server-side encryption (`src/s3_video_store.py:99-104`, `:151-158`).
-2. **Success:** the source is deleted and its record set to `deleted` (`src/pipeline_executor.py:295-297`, `:32-44`).
-3. **Failure:** the source is kept and its record set to `retained_after_failure` (`:47-53`, `:286-288`) for manual cleanup.
-4. **Delete fails:** record `delete_failed`, key kept (`:32-44`).
-5. **Highlights:** never deleted automatically (`:56-76`).
-6. **Signed links:** the worker's source link lasts `VIDEO_S3_PRESIGN_EXPIRES` seconds, default 3600, clamped between 60 seconds and 7 days
-   (`src/s3_video_store.py:30`, `:81-96`). Playback and download links are one hour and generated fresh each time
-   (`src/s3_video_store.py:300-355`).
+1. **Required:** `ensure_ready()` checks credentials, bucket access, and that credentials last long enough for one-hour
+   links. `/api/summarize` runs it before anything is saved or started (`app.py`, `summarize`).
+2. **Source video:** uploaded to `jobs/<job_id>/<video_uid>/source.mp4` before processing, with SSE-S3 encryption, and
+   recorded in the job's file list. It is kept, not deleted after the job.
+3. **Every other file** in the job folder is uploaded at the end (`publish_job`), except local bookkeeping and render
+   scratch (`s3_video.json`, `s3_highlights.json`, `build/` folders). Each upload is checked by size.
+4. **Manifest last:** `manifest.json` holds the job ID, video ID, status, results, and each file's key. A job is listed in
+   History only when its manifest exists. A failed upload writes no manifest.
+5. **Failed jobs:** `publish_failure` writes a manifest with `status: error`, the neutral message, and the code, so
+   History shows the failure and the job can be deleted.
+6. **History and reads:** History and results come from manifests in S3 (30-second cache, cleared by any write). Downloads
+   and playback redirect to a fresh one-hour presigned link for the file's own key. Nothing is served from the local folder.
+7. **Retries:** the job's files are copied from S3 to a temporary folder, the failed languages are rendered, and only
+   changed files are uploaded again (`_file_digests`).
+8. **Delete:** `delete_job` removes every file, then the manifest last. A partly failed delete keeps the manifest.
+9. **Links:** the RunPod worker gets a presigned source link only when `VIDEO_S3_WORKER_URL_SUPPORT` is true. Links are
+   never logged or saved.
 
-**Gap:** no bucket lifecycle rule exists in code. `docs/S3_SOURCE_RETENTION_PLAN.md` describes a proposal, not an implementation.
+**Gap:** no bucket lifecycle rule exists in code, so storage grows until jobs are deleted.
+`docs/S3_SOURCE_RETENTION_PLAN.md` describes a proposal, not an implementation.
 
 ## 8.18 Logging safety (`src/log_safety.py`)
 

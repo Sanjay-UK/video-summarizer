@@ -30,54 +30,6 @@ from src.transcriber import transcribe_audio
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
-def _delete_s3_source(store: Any, job_output_dir: Path, key: str, log: Callable[[str], None]) -> None:
-    """Delete the uploaded source after a completed job. A failed delete is reported and the key is kept."""
-    from src import s3_video_store as s3
-
-    record = s3.read_record(job_output_dir)
-    try:
-        store.delete(key)
-        record.update({"status": "deleted", "deleted_at": s3.utc_now()})
-        log("Source video deleted from S3 after the worker finished.")
-    except Exception as exc:  # noqa: BLE001 — report, keep the key for manual cleanup
-        record.update({"status": "delete_failed", "delete_error": type(exc).__name__})
-        log(f"WARNING: could not delete S3 source ({type(exc).__name__}); key kept in {s3.S3_RECORD_NAME}.")
-    s3.write_record(job_output_dir, record)
-
-
-def _mark_s3_retained(job_output_dir: Path, key: str, log: Callable[[str], None]) -> None:
-    from src import s3_video_store as s3
-
-    record = s3.read_record(job_output_dir)
-    record.update({"status": "retained_after_failure", "retained_at": s3.utc_now()})
-    s3.write_record(job_output_dir, record)
-    log(f"S3 source kept for retry (key recorded in {s3.S3_RECORD_NAME}).")
-
-
-def _store_highlights_in_s3(
-    job_output_dir: Path, paths: dict[str, Path], store: Any, log: Callable[[str], None]
-) -> dict[str, Path]:
-    """Upload each finished highlight and record its key. A language whose upload fails is reported as failed.
-
-    Highlights are never deleted here. Their keys stay in s3_highlights.json so the job remains usable in History.
-    """
-    from src import s3_video_store as s3
-    from src.highlight_pipeline import _write_lang_failure
-
-    kept: dict[str, Path] = {}
-    for lang, mp4 in paths.items():
-        record = s3.upload_highlight(job_output_dir, lang, mp4, store)
-        if record.get("status") == "uploaded":
-            log(f"Highlight {lang} stored in S3 (key recorded in {s3.HIGHLIGHT_RECORD_NAME}).")
-            kept[lang] = mp4
-        else:
-            log(f"Highlight upload failed ({record.get('error_code', 'error')}).")
-            message = "The highlight video could not be saved. Please try again."
-            log(message)
-            _write_lang_failure(job_output_dir, lang, message, failure_kind="s3_upload")
-    return kept
-
-
 class PipelineExecutor(ABC):
     mode: str
 
@@ -92,6 +44,7 @@ class PipelineExecutor(ABC):
         compression: str,
         languages: list[str],
         log: Callable[[str], None],
+        source_url: str | None = None,
     ) -> dict[str, Path] | Path:
         from src.highlight_pipeline import run_highlight_pipeline
 
@@ -217,6 +170,7 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
         compression: str,
         languages: list[str],
         log: Callable[[str], None],
+        source_url: str | None = None,
     ) -> dict[str, Path] | Path:
         from src.serverless_model_catalog import serverless_highlight_on_worker
 
@@ -241,30 +195,6 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
         segments_json = json.dumps(segments)
         lang_csv = ",".join(languages)
 
-        s3_key: str | None = None
-        s3_store = None
-        video_url: str | None = None
-        from src import s3_video_store as s3
-
-        if s3.s3_enabled():
-            # Source goes to S3 and the worker gets a presigned URL. The presigned URL is never logged or saved.
-            s3_store = s3.VideoStore(s3.settings_from_env())
-            s3_key = s3.make_object_key(video_path.name)
-            try:
-                s3_store.upload_source(video_path, s3_key)
-                s3.write_record(job_output_dir, {
-                    "bucket": s3_store.bucket, "key": s3_key, "status": "uploaded",
-                    "uploaded_at": s3.utc_now(), "deleted_at": None,
-                })
-                video_url = s3_store.presign_get(s3_key)
-                log(f"Source uploaded to S3 (key recorded in {s3.S3_RECORD_NAME}).")
-            except Exception as exc:
-                log(f"Source upload failed ({type(exc).__name__}); highlight processing was not started.")
-                message = "The source video could not be prepared for highlight rendering. Please try again."
-                for lang in languages:
-                    _write_lang_failure(job_output_dir, lang, message, failure_kind="s3_upload")
-                return {}
-
         try:
             run_highlight_phase_via_serverless(
                 endpoint_id=endpoint_id,
@@ -276,7 +206,7 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
                 compression=compression,
                 languages=lang_csv,
                 log=log,
-                video_url=video_url,
+                video_url=source_url,
             )
         except Exception as exc:
             # No silent local fallback: a locally rendered video must never be reported as a worker result.
@@ -284,9 +214,6 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
             # The raw error is logged for debugging; the user sees a neutral message.
             log(f"Highlight processing failed: {safe_exc(exc)}")
             message = GENERIC_HIGHLIGHT_FAILURE
-            if s3_key and s3_store is not None:
-                # Keep the source so a retry can reuse it; the key is recorded for manual cleanup.
-                _mark_s3_retained(job_output_dir, s3_key, log)
             for lang in languages:
                 _write_lang_failure(
                     job_output_dir,
@@ -295,9 +222,6 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
                     failure_kind="runpod_worker",
                 )
             return {}
-        if s3_key and s3_store is not None:
-            # The RunPod job completed, so the worker has finished downloading the source.
-            _delete_s3_source(s3_store, job_output_dir, s3_key, log)
         from src.highlight_jobs import highlight_file_for_lang
 
         paths: dict[str, Path] = {}
@@ -310,8 +234,6 @@ class ServerlessRunpodPipelineExecutor(PipelineExecutor):
             log(f"No highlight file was returned for {lang}.")
             message = GENERIC_HIGHLIGHT_FAILURE
             _write_lang_failure(job_output_dir, lang, message, failure_kind="runpod_worker")
-        if s3_store is not None and paths:
-            paths = _store_highlights_in_s3(job_output_dir, paths, s3_store, log)
         return paths
 
 

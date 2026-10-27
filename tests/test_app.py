@@ -7,7 +7,8 @@ Replaced (external services only):
 - Google Translate: google_translate_batch is mocked and the HTTP layer is guarded, so no call reaches Google.
 - NLLB (local translation model): mocked to fail, so the fallback chain ends without loading a model.
 - Whisper, Ollama, edge-tts: the same stand-ins as test_video_pipeline_integration.py.
-- RunPod, GPU workers, S3: not used. The runtime is patched to local, and S3 is off unless VIDEO_S3_ENABLED is set.
+- RunPod and GPU workers: not used. The runtime is patched to local. S3 is replaced by an in-memory bucket
+  (tests/fake_s3_client.py), so job files, History, and downloads go through the same code paths as production.
 
 Not covered: YouTube download, translation quality or Hindi speech, RunPod workers, and browser behaviour.
 The run-based classes need an FFmpeg build with libass (the subtitles filter) and are skipped without one.
@@ -26,6 +27,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+import fake_s3_client  # noqa: E402 — tests/ is on sys.path under CI's discover
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -88,6 +91,40 @@ def _offline_translation(stack: contextlib.ExitStack, google_behaviour):
     return google, nllb
 
 
+class _Served:
+    """What the browser ends up with after a redirect to storage: the stored bytes and the headers the link asks for."""
+
+    def __init__(self, status_code, data, headers, mimetype):
+        self.status_code = status_code
+        self.data = data
+        self.headers = headers
+        self.mimetype = mimetype
+
+    def get_json(self):
+        return json.loads(self.data.decode("utf-8"))
+
+    def close(self):
+        pass
+
+
+class _ServedClient:
+    """Flask test client that follows a redirect to a stored file, so download checks compare the stored bytes."""
+
+    def __init__(self, client, store):
+        self._client = client
+        self._store = store
+
+    def get(self, url, **kwargs):
+        resp = self._client.get(url, **kwargs)
+        if resp.status_code != 302:
+            return resp
+        key = fake_s3_client.key_from_link(resp.headers["Location"])
+        params = self._store.client.presigned[-1]["params"]
+        headers = {"Content-Disposition": params.get("ResponseContentDisposition", "")}
+        mimetype = params.get("ResponseContentType", "application/octet-stream").split(";")[0]
+        return _Served(200, self._store.client.objects[key], headers, mimetype)
+
+
 class _InlineThread:
     """Runs the target inside start(), so a route test sees the finished job without waiting on a background thread."""
 
@@ -113,7 +150,7 @@ class _PipelineTestBase(unittest.TestCase):
         self.jobs = {}
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
-        _start_environment(stack, self.out, self.jobs, FakeWhisperModel)
+        self.store = _start_environment(stack, self.out, self.jobs, FakeWhisperModel)
         # self.google.side_effect and self.nllb.side_effect can be changed per test.
         self.google, self.nllb = _offline_translation(stack, _google_returns_hindi)
         self.client = app_module.app.test_client()
@@ -143,9 +180,9 @@ class CorruptedInputTests(_PipelineTestBase):
         for name in ("transcript.txt", "segments.json", "summary.txt", "summary.srt", "audio_explanation.mp3"):
             self.assertFalse((job_dir / name).exists(), f"{name} must not exist after a failed extraction")
         self.assertEqual(list(job_dir.glob("audio.*")), [], "no audio file may be left from a failed extraction")
-        meta = json.loads((job_dir / "summary_metadata.json").read_text(encoding="utf-8"))
-        self.assertEqual(meta["status"], "error")
-        self.assertEqual(meta["error"], "FFmpeg extraction failed")
+        manifest = fake_s3_client.manifest(self.store, self.JOB_ID)
+        self.assertEqual(manifest["status"], "error")
+        self.assertEqual(manifest["error"], "FFmpeg extraction failed")
 
     def test_upload_route_reports_a_corrupted_video_as_a_failed_job(self):
         inline = SimpleNamespace(RLock=threading.RLock, Thread=_InlineThread)
@@ -319,14 +356,14 @@ class _CompletedRunBase(unittest.TestCase):
         cls.jobs = {}
         stack = contextlib.ExitStack()
         cls.addClassCleanup(stack.close)
-        _start_environment(stack, cls.out, cls.jobs, FakeWhisperModel)
+        cls.store = _start_environment(stack, cls.out, cls.jobs, FakeWhisperModel)
         _offline_translation(stack, _google_returns_hindi)
 
         cls.job = app_module.JobProgress(cls.JOB_ID, str(cls.video))
         cls.jobs[cls.JOB_ID] = cls.job
         cls.ok = app_module.process_video(cls.JOB_ID, str(cls.video), **cls.RUN_OPTIONS)
         cls.job_dir = cls.out / cls.JOB_ID
-        cls.client = app_module.app.test_client()
+        cls.client = _ServedClient(app_module.app.test_client(), cls.store)
         if not cls.ok:
             raise AssertionError("pipeline failed: " + " | ".join(cls.job.log_lines[-5:]))
 
@@ -352,7 +389,7 @@ class CompletedJobRoutesTests(_CompletedRunBase):
         self.assertEqual((rows["hi"]["status"], rows["hi"]["translator"], rows["hi"]["available"]),
                          ("success", "google", True))
 
-    def test_results_route_rebuilds_the_same_content_from_disk_after_a_restart(self):
+    def test_results_route_rebuilds_the_same_content_from_storage_after_a_restart(self):
         live = self.client.get(f"/api/results/{self.JOB_ID}").get_json()
         with mock.patch.object(app_module, "jobs", {}):
             resp = self.client.get(f"/api/results/{self.JOB_ID}")

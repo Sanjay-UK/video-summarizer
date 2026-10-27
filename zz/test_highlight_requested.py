@@ -103,14 +103,14 @@ class ProcessRunTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from tests.test_progress_fixes import app_module
+        from test_progress_fixes import app_module
 
         if app_module is None:
             raise unittest.SkipTest("the Flask app is not part of the worker image")
 
     def _probe(self, highlight, executor_result=None):
         """Run a full job and capture what it writes. Files are read inside the run, before its temp folder is removed."""
-        from tests.test_progress_fixes import FullRunTestBase, app_module
+        from test_progress_fixes import FullRunTestBase, app_module
 
         captured = {}
 

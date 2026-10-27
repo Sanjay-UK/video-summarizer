@@ -171,11 +171,19 @@ your network needs a deliberate change and its own access control. None is inclu
 **Retry in RunPod mode:** the highlight Retry button renders on this machine, so it is refused in RunPod mode with a
 message to switch to Local mode or re-run the job. Local mode retries as before.
 
-## Optional: S3 source-video storage for RunPod highlights
+## Required: S3 storage for every job
 
-Off by default. Local mode and the current worker (`v1.0.11`) are unaffected. When on, the source video is
-uploaded to S3 and the worker downloads it through a presigned URL that expires (default 3600 s), instead of
-receiving the video bytes in the request.
+S3 is the only store for what the app shows. Every finished job's files (source video, transcript, summary,
+audio, subtitles, and highlight videos) are uploaded to the private bucket, and the job's manifest is written last.
+History, results, playback, and downloads all read from S3. The local `output/` folder is scratch space while a job
+runs. The app never reads it to show a job, so a second laptop with the same bucket shows the same History.
+
+If S3 is not set up, new jobs are refused with a message saying so. Nothing is processed and kept only on this machine.
+
+**Storage layout:** `jobs/<job_id>/<video_uid>/manifest.json` (written last; a job appears in History only when this
+exists) and every other file under the same prefix. `job_id` is the short ID shown in the app. `video_uid` is a UUID
+created for each video. Jobs written before this change have no manifest, so they are not listed. Their files stay in
+the bucket until you delete them.
 
 **Credentials:** never put AWS keys in the repo, `.env`, logs, or prompts. The app always uses a named
 profile: `video-summarizer` by default, or the name in `VIDEO_S3_PROFILE`. It never uses the AWS `default`
@@ -184,12 +192,17 @@ yourself (you will be prompted for the key; nothing is stored in the project):
 
     aws configure --profile video-summarizer
 
+**Permissions the profile needs** on bucket `video-summarizer-757374023708-ap-south-1-an`:
+`s3:ListBucket` (History and the readiness check), `s3:GetObject` (`head` and downloads), `s3:PutObject` (uploads),
+`s3:DeleteObject` (Delete job), and `s3:GetBucketLocation` and `s3:GetEncryptionConfiguration` (the check script).
+
 **Read-only check (uploads and deletes nothing):**
 
     VIDEO_S3_PROFILE=video-summarizer venv-mac/bin/python scripts/check_video_s3.py
 
 It confirms the caller identity, bucket region (`ap-south-1`), SSE-S3 encryption, public-access blocking,
-and that presigned URLs sign. It exits non-zero on any failure.
+listing, and that presigned URLs sign. It exits non-zero on any failure. It does not prove write or delete
+permission; that needs a real upload.
 
 **Settings** (set in your shell or local launch environment; the profile name is not a secret, so it may
 also go in `.env`):
@@ -199,29 +212,18 @@ also go in `.env`):
 | `VIDEO_S3_PROFILE` | `video-summarizer` | Named AWS profile to use |
 | `VIDEO_S3_BUCKET` | `video-summarizer-757374023708-ap-south-1-an` | Default already set in code |
 | `VIDEO_S3_REGION` | `ap-south-1` | Default already set in code |
-| `VIDEO_S3_PRESIGN_EXPIRES` | `3600` | Seconds; clamped to 60 s – 7 days |
-| `VIDEO_S3_ENABLED` | `true` | Turns storage on |
-| `VIDEO_S3_WORKER_URL_SUPPORT` | `true` | Set **only** after a worker image that accepts `video_url` jobs is deployed |
+| `VIDEO_S3_PRESIGN_EXPIRES` | `3600` | Seconds; clamped to 60 s – 7 days. Links issued to the app are always one hour. |
+| `VIDEO_S3_WORKER_URL_SUPPORT` | `true` | Only for RunPod highlights. Set **only** after a worker image that accepts `video_url` jobs is deployed. Without it, the worker gets the video bytes in the request instead. |
 
-Both `VIDEO_S3_ENABLED` and `VIDEO_S3_WORKER_URL_SUPPORT` must be `true`. Setting only the first one keeps
-storage off, so a single setting cannot break highlights on the current worker.
+`VIDEO_S3_ENABLED` no longer exists. Storage is always on.
 
-**Behavior when on:** the source is uploaded with a unique key (UUID at the bucket root). The worker gets a
-presigned URL. The object is deleted only after the RunPod job completes. If the job fails, the object is
-kept and its key is recorded in the job folder (`s3_video.json`) for retry or manual cleanup. Presigned URLs
-are never written to disk.
+**Behavior:** the source video is uploaded before processing starts. A failed upload fails the job with a message, and
+no local copy is used instead. Each finished file is uploaded and checked by size. The manifest is written only after
+every file is in place, so a half-uploaded job never shows in History. Playback and download links are fresh one-hour
+presigned URLs and are never saved.
 
-**Highlights in S3 (when both flags are on):** each finished highlight is uploaded to the private bucket under
-`highlights/<uuid>/<lang>.mp4`, and its key, size, and status are saved in the job folder
-(`s3_highlights.json`). No URL is saved anywhere. Every play or download asks the app for a fresh link that lasts
-one hour (`/api/highlight-url/<job>/<lang>`). The page asks again once if playback fails. If S3 cannot give a
-link, the page shows the error. It never plays the local copy in place of S3.
-
-- **Retention:** highlight objects are kept indefinitely, so History keeps working. Nothing deletes them. A
-  retention or cleanup rule would need its own decision and a test.
-- **Credentials:** the profile's access key is long-term, so links stay valid until the key is rotated. If the
-  profile ever uses temporary credentials that end within an hour, the app refuses to sign a link and says why.
-- **Restarting the app without the two flags** stops new uploads. Existing S3 highlights still open in History.
+**Deleting a job:** open the job and press **Delete job**. This removes every file of the job from S3 and cannot be
+undone. A running job cannot be deleted. If a delete fails partway, the job stays in History so you can try again.
 
 ## Endpoint worker capacity (lease lifecycle)
 

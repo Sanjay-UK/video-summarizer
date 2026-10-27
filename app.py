@@ -10,9 +10,10 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Union
-from flask import Flask, render_template, request, jsonify, redirect, send_file
+from flask import Flask, render_template, request, jsonify, redirect
 from datetime import datetime
 import uuid
+import hashlib
 import os
 import shutil
 
@@ -23,10 +24,9 @@ from src.audio_extractor import extract_audio
 from src.subtitle_generator import generate_subtitles
 from src.tts_generator import generate_audio_explanation
 from config import OUTPUT_DIR, DOWNLOADS_DIR, SUMMARIZATION_MODEL, choose_whisper_model
-from src.job_video import copy_source_video_to_job
+from src.job_video import JOB_SOURCE_BASENAME, copy_source_video_to_job
 from src.highlight_ffmpeg import log_ffmpeg_subtitles_status_on_startup
 from src.highlight_jobs import (
-    highlight_file_for_lang,
     list_highlight_downloads,
     list_highlight_language_status,
     list_output_languages,
@@ -38,7 +38,7 @@ from src.highlight_pipeline import (
     record_unrecorded_highlight_failures,
     retry_highlight_languages,
 )
-from src.highlight_assembler import ensure_narration_track
+from src.highlight_assembler import HIGHLIGHT_NARRATION_FILE, ensure_narration_track
 from src import s3_video_store as s3
 from src.locales import LOCALES, parse_language_list
 from src.youtube_errors import (
@@ -85,91 +85,17 @@ def inject_compute_deploy_status():
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 
 jobs = {}
-job_history = []
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "videosummarizer_uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-def enrich_history_entry(entry: dict) -> dict:
-    """Attach on-disk artifacts (highlights, summary langs, audio) for history UI."""
-    job_id = entry.get("job_id", "")
-    job_dir = OUTPUT_DIR / job_id
-    if not job_dir.is_dir():
-        return entry
-
-    highlights = list_highlight_downloads(job_dir)
-    entry["highlights"] = highlights
-    entry["has_highlight_video"] = len(highlights) > 0
-    entry["s3_stored_highlights"] = s3.stored_highlight_langs(job_dir)
-
-    i18n = summary_translations_for_api(job_dir)
-    tr_keys = list((i18n.get("summary_translations") or {}).keys())
-    entry["summary_languages"] = ["en"] + [c for c in tr_keys if c != "en"]
-    entry["has_summary"] = (job_dir / "summary.txt").is_file()
-    entry["has_audio"] = (job_dir / "audio_explanation.mp3").is_file()
-
-    if not entry.get("output_languages"):
-        entry["output_languages"] = list_output_languages(job_dir)
-
-    metadata_path = job_dir / "summary_metadata.json"
-    if metadata_path.is_file():
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            entry.setdefault("source", metadata.get("source", entry.get("source", job_id)))
-            entry.setdefault("created_at", metadata.get("created_at", ""))
-            entry.setdefault("completed_at", metadata.get("completed_at", ""))
-            entry.setdefault("status", metadata.get("status", entry.get("status", "completed")))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return entry
-
-
-def load_existing_jobs():
-    """Scan output directory and load existing job history."""
-    if not OUTPUT_DIR.exists():
-        return
-
-    for job_dir in sorted(OUTPUT_DIR.iterdir(), reverse=True):
-        if not job_dir.is_dir():
-            continue
-
-        job_id = job_dir.name
-
-        if any(j["job_id"] == job_id for j in job_history):
-            continue
-
-        summary_path = job_dir / "summary.txt"
-        metadata_path = job_dir / "summary_metadata.json"
-        if not summary_path.is_file() and not metadata_path.is_file():
-            continue
-
-        entry: dict = {
-            "job_id": job_id,
-            "source": job_id,
-            "created_at": datetime.fromtimestamp(job_dir.stat().st_mtime).isoformat(),
-            "status": "completed" if summary_path.is_file() else "processing",
-        }
-        if metadata_path.is_file():
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                entry["source"] = metadata.get("source", entry["source"])
-                entry["created_at"] = metadata.get("created_at", entry["created_at"])
-                entry["completed_at"] = metadata.get("completed_at", "")
-                entry["status"] = metadata.get(
-                    "status",
-                    "completed" if summary_path.is_file() else "processing",
-                )
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        job_history.append(enrich_history_entry(entry))
-
-load_existing_jobs()
-
 class JobProgress:
     """Track job progress."""
-    def __init__(self, job_id, source):
+    def __init__(self, job_id, source, display_name=None, video_uid=None):
         self.job_id = job_id
         self.source = source
+        self.display_name = display_name or source
+        self.video_uid = video_uid or s3.make_video_uid()
+        self.uploaded_files = {}  # files already in S3 for this job, so none is sent twice
         self.current_step = None
         self.progress = 0.0
         self.status = "processing"
@@ -361,6 +287,9 @@ def process_video(
         job.add_log(f"Video ready: {video_path.name}")
         staged_video = copy_source_video_to_job(video_path, job.job_output_dir)
         job.add_log(f"Staged copy in job dir: {staged_video.name}")
+        store = _s3_store()
+        _upload_source_to_s3(job, store, staged_video)
+        source_url = _source_url_for_worker(job, store)
 
         job.set_step("extracting_audio", 0.15)
         job.add_log("Extracting audio from video...")
@@ -510,6 +439,7 @@ def process_video(
                     compression=compression,
                     languages=lang_codes,
                     log=job.add_log,
+                    source_url=source_url,
                 )
                 if isinstance(highlight_out, dict):
                     highlight_paths = dict(highlight_out)
@@ -537,85 +467,50 @@ def process_video(
         else:
             job.set_step("generating_subtitles", 0.98)
 
+        results = _results_payload(job.job_output_dir, len(transcription.get("text", "")))
+        _prepare_downloadable_files(job.job_output_dir, results)
+        job.add_log("Saving results to storage...")
+        completed_at = datetime.now()
+        s3.publish_job(
+            store,
+            job.job_output_dir,
+            job_id=job_id,
+            video_uid=job.video_uid,
+            source_name=job.display_name,
+            created_at=job.created_at.isoformat(),
+            completed_at=completed_at.isoformat(),
+            results=results,
+            known_files=job.uploaded_files,
+        )
         job.add_log("Pipeline completed successfully!")
         job.mark_completed()
-
-        summary_path = job.job_output_dir / "summary.txt"
-        summary_text = open(summary_path, encoding="utf-8").read() if summary_path.exists() else ""
-        summary_text = clean_summary_text_for_display(summary_text, "en")
-
-        highlight_downloads = list_highlight_downloads(job.job_output_dir)
-        highlight_status = list_highlight_language_status(job.job_output_dir)
-        summary_i18n = summary_translations_for_api(job.job_output_dir)
-        results = {
-            "status": "completed",
-            "summary": summary_text,
-            "transcript_length": len(transcription.get("text", "")),
-            "summary_length": len(summary_text),
-            "has_audio": (job.job_output_dir / "audio_explanation.mp3").is_file(),
-            "highlight_video": len(highlight_downloads) > 0,
-            "highlight_languages": highlight_downloads,
-            "highlight_language_status": highlight_status,
-            **summary_i18n,
-            "output_languages": list_output_languages(job.job_output_dir),
-        }
-
         job.results = results
-
-        for item in job_history:
-            if item["job_id"] == job_id:
-                item["status"] = "completed"
-                item["completed_at"] = job.completed_at.isoformat()
-                enrich_history_entry(item)
-                break
-
-        metadata = {
-            "job_id": job_id,
-            "source": job.source,
-            "created_at": job.created_at.isoformat(),
-            "completed_at": job.completed_at.isoformat(),
-            "status": "completed",
-            "transcript_length": len(transcription.get("text", "")),
-            "summary_length": len(summary_text)
-        }
-        with open(job.job_output_dir / "summary_metadata.json", "w") as f:
-            json.dump(metadata, f, indent=2)
-
         return True
 
     except Exception as e:
         error_msg = f"Error: {sanitize_technical(str(e))}"
         job.add_log(error_msg)
-        job.mark_failed(str(e), e.code if isinstance(e, YouTubeDownloadError) else None)
+        job.mark_failed(
+            str(e),
+            e.code if isinstance(e, (YouTubeDownloadError, s3.HighlightStoreError)) else None,
+        )
         import traceback
         print(safe_traceback())
 
         try:
-            for item in job_history:
-                if item["job_id"] == job_id:
-                    item["status"] = "error"
-                    item["completed_at"] = job.completed_at.isoformat()
-                    item["error"] = str(e)
-                    break
-        except Exception as hist_exc:
-            print(f"[WARN] job_history update failed for {job_id}: {hist_exc}")
-
-        try:
-            metadata = {
-                "job_id": job_id,
-                "source": job.source,
-                "created_at": job.created_at.isoformat(),
-                "completed_at": job.completed_at.isoformat(),
-                "status": "error",
-                "error": job.error,
-                "error_code": job.error_code,
-            }
-            job.job_output_dir.mkdir(parents=True, exist_ok=True)
-            with open(job.job_output_dir / "summary_metadata.json", "w") as f:
-                json.dump(metadata, f, indent=2)
-        except Exception as meta_exc:
-            print(f"[WARN] summary_metadata write failed for {job_id}: {meta_exc}")
-
+            s3.publish_failure(
+                _s3_store(),
+                job_id=job_id,
+                video_uid=job.video_uid,
+                source_name=job.display_name,
+                created_at=job.created_at.isoformat(),
+                completed_at=job.completed_at.isoformat(),
+                error=job.error or GENERIC_FAILURE,
+                error_code=job.error_code,
+                known_files=job.uploaded_files,
+            )
+        except Exception as meta_exc:  # noqa: BLE001 — the job already shows its error on screen
+            print(f"[WARN] failed-job record not saved to storage for {job_id}: {type(meta_exc).__name__}")
         return False
     finally:
         reset_reporter(reporter_token)
@@ -789,6 +684,8 @@ def job_page(job_id):
 def summarize():
     """Start summarization process from URL or uploaded file."""
     try:
+        # Storage is required. Check it before the upload is saved, so nothing is started that cannot be kept.
+        s3.ensure_ready(_s3_store())
         url = request.form.get("url", "").strip()
         # Homepage no longer exposes model picker; serverless GPU page saves worker models separately.
         model = SUMMARIZATION_MODEL
@@ -826,15 +723,8 @@ def summarize():
             return jsonify({"error": "Please provide a YouTube URL or upload a video file"}), 400
 
         job_id = str(uuid.uuid4())[:8]
-        job = JobProgress(job_id, source)
+        job = JobProgress(job_id, source, display_name=display_name)
         jobs[job_id] = job
-
-        job_history.append({
-            "job_id": job_id,
-            "source": display_name,
-            "created_at": job.created_at.isoformat(),
-            "status": "processing"
-        })
 
         pipeline_runtime = request.form.get("pipeline_runtime", "").strip() or None
         if pipeline_runtime:
@@ -857,6 +747,8 @@ def summarize():
 
         return jsonify({"job_id": job_id}), 200
 
+    except s3.HighlightStoreError as exc:
+        return jsonify({"error": redact(str(exc)), "code": exc.code}), s3.ERROR_STATUS.get(exc.code, 503)
     except Exception as e:
         return jsonify({"error": redact(str(e))}), 500
 
@@ -869,23 +761,120 @@ def progress(job_id):
     job = jobs[job_id]
     return jsonify(job.to_dict()), 200
 
-def _failed_job_payload(job_dir: Path):
-    """Error payload for a job whose metadata says it failed, else None."""
-    metadata_path = job_dir / "summary_metadata.json"
-    if not metadata_path.is_file():
+def _s3_store():
+    """The configured S3 bucket. The AWS client is created on first use, not here."""
+    return s3.highlight_store()
+
+
+def _upload_source_to_s3(job, store, staged_video: Path) -> None:
+    """The source video is saved to S3 before any processing. Its key is recorded with the job."""
+    job.add_log("Saving the source video to storage...")
+    job.uploaded_files[JOB_SOURCE_BASENAME] = s3.upload_job_file(
+        store, job.job_id, job.video_uid, staged_video, JOB_SOURCE_BASENAME
+    )
+    job.add_log("Source video saved.")
+
+
+def _source_url_for_worker(job, store) -> str | None:
+    """A one-hour link for the RunPod worker to download the source. Only when the worker supports URLs.
+
+    The link is handed to the worker and never logged or saved.
+    """
+    if not s3.worker_url_support():
         return None
+    entry = job.uploaded_files[JOB_SOURCE_BASENAME]
+    return store.presign_get(entry["key"], expires=s3.HIGHLIGHT_URL_EXPIRES, content_type=entry["content_type"])
+
+
+def _results_payload(job_dir: Path, transcript_length: int) -> dict:
+    """The results shown on the results page, built from a job folder. Saved to S3 as part of the manifest."""
+    summary_path = job_dir / "summary.txt"
+    summary_text = summary_path.read_text(encoding="utf-8") if summary_path.is_file() else ""
+    summary_text = clean_summary_text_for_display(summary_text, "en")
+    highlight_downloads = list_highlight_downloads(job_dir)
+    summary_i18n = summary_translations_for_api(job_dir)
+    return {
+        "status": "completed",
+        "summary": summary_text,
+        "transcript_length": transcript_length,
+        "summary_length": len(summary_text),
+        "has_audio": (job_dir / "audio_explanation.mp3").is_file(),
+        "highlight_video": len(highlight_downloads) > 0,
+        "highlight_languages": highlight_downloads,
+        "highlight_language_status": list_highlight_language_status(job_dir),
+        "requested_languages": read_highlight_status(job_dir).get("requested_languages") or [],
+        **summary_i18n,
+        "output_languages": list_output_languages(job_dir),
+    }
+
+
+def _prepare_downloadable_files(job_dir: Path, results: dict) -> None:
+    """Write the per-language files that downloads serve, so each one is uploaded with the job.
+
+    Downloads never generate files on demand: once the job is in S3, only what was uploaded can be served.
+    """
+    for code in results.get("summary_translations") or {}:
+        if code == "en":
+            continue
+        target = job_dir / f"summary_{code}.txt"
+        if not target.is_file():
+            text = summary_text_for_language(job_dir, code)
+            if text:
+                target.write_text(text, encoding="utf-8")
+    if "en" in (results.get("requested_languages") or []):
+        ensure_narration_track(job_dir / "highlights" / "en")
+
+
+def _load_manifest(job_id: str):
+    """(manifest, None) for a stored job, or (None, response) when it cannot be shown."""
+    if not _valid_job_id(job_id):
+        return None, (jsonify({"error": "Job not found"}), 404)
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    if metadata.get("status") != "error":
-        return None
-    return {"error": public_error(metadata.get("error"), default=GENERIC_FAILURE), "code": metadata.get("error_code")}
+        manifest = s3.load_job_manifest(_s3_store(), job_id)
+    except Exception as exc:  # noqa: BLE001 — log the type only; messages can carry sensitive detail
+        error = s3.as_store_error(exc)
+        print(f"[S3] job {job_id} could not be read: {error.code} ({type(exc).__name__})")
+        return None, (jsonify({"error": redact(str(error)), "code": error.code}), s3.ERROR_STATUS.get(error.code, 503))
+    if manifest is None:
+        return None, (jsonify({"error": "Job not found"}), 404)
+    return manifest, None
+
+
+def _history_entry(manifest: dict) -> dict:
+    results = manifest.get("results") or {}
+    files = manifest.get("files") or {}
+    highlights = results.get("highlight_languages") or []
+    summary_langs = ["en"] + [c for c in (results.get("summary_translations") or {}) if c != "en"]
+    return {
+        "job_id": manifest["job_id"],
+        "video_uid": manifest["video_uid"],
+        "source": manifest.get("source") or manifest["job_id"],
+        "status": manifest.get("status", "completed"),
+        "error": manifest.get("error"),
+        "created_at": manifest.get("created_at", ""),
+        "completed_at": manifest.get("completed_at", ""),
+        "has_summary": "summary.txt" in files,
+        "summary_languages": summary_langs,
+        "has_audio": "audio_explanation.mp3" in files,
+        "highlights": highlights,
+        "has_highlight_video": len(highlights) > 0,
+        "output_languages": results.get("output_languages") or [],
+    }
+
+
+def _warn_if_storage_unavailable() -> None:
+    try:
+        s3.ensure_ready(_s3_store())
+        print("[startup] S3 storage OK")
+    except s3.HighlightStoreError as exc:
+        print(f"[startup] S3 storage is not ready ({exc.code}). New jobs cannot start until this is fixed.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[startup] S3 storage check skipped: {type(exc).__name__}")
 
 
 @app.route("/api/results/<job_id>", methods=["GET"])
 def results(job_id):
-    """Get final results."""
+    """Results for a job. A job still running here is answered from memory; any other job is read from S3."""
     job = jobs.get(job_id)
 
     if job:
@@ -897,104 +886,92 @@ def results(job_id):
         else:
             return jsonify({"status": "processing"}), 202
 
-    job_dir = OUTPUT_DIR / job_id
-    summary_path = job_dir / "summary.txt"
-    transcript_path = job_dir / "transcript.txt"
+    manifest, error = _load_manifest(job_id)
+    if error is not None:
+        return error
+    if manifest.get("status") == "error":
+        code = manifest.get("error_code")
+        return jsonify({"error": manifest.get("error") or GENERIC_FAILURE, "code": code}), (
+            422 if code in USER_ACTIONABLE_CODES else 500
+        )
+    payload = manifest.get("results")
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Failed to load job data"}), 500
+    return jsonify(payload), 200
 
-    # A failed job is recorded in its metadata. Partial files must never make it look successful.
-    failed = _failed_job_payload(job_dir)
-    if failed is not None:
-        return jsonify(failed), (422 if failed.get("code") in USER_ACTIONABLE_CODES else 500)
-
-    if summary_path.exists():
-        try:
-            summary_text = open(summary_path, encoding="utf-8").read()
-            summary_text = clean_summary_text_for_display(summary_text, "en")
-            transcript_length = len(open(transcript_path, encoding="utf-8").read()) if transcript_path.exists() else 0
-
-            highlight_downloads = list_highlight_downloads(job_dir)
-            highlight_status = list_highlight_language_status(job_dir)
-            summary_i18n = summary_translations_for_api(job_dir)
-            return jsonify({
-                "status": "completed",
-                "summary": summary_text,
-                "transcript_length": transcript_length,
-                "summary_length": len(summary_text),
-                "has_audio": (job_dir / "audio_explanation.mp3").is_file(),
-                "highlight_video": len(highlight_downloads) > 0,
-                "highlight_languages": highlight_downloads,
-                "highlight_language_status": highlight_status,
-                **summary_i18n,
-                "output_languages": list_output_languages(job_dir),
-            }), 200
-        except Exception as e:
-            print(f"[ERROR] Failed to load old job {job_id}: {safe_exc(e)}")
-            return jsonify({"error": "Failed to load job data"}), 500
-
-    return jsonify({"error": "Job not found"}), 404
 
 @app.route("/api/history", methods=["GET"])
 def history():
-    """Get job history (all processed videos)."""
-    enriched = [enrich_history_entry(dict(entry)) for entry in job_history]
-    return jsonify({
-        "jobs": list(reversed(enriched)),
-        "total": len(enriched),
-    }), 200
+    """Every job stored in S3, newest first. A job still running on this machine is listed as 'processing'."""
+    try:
+        manifests = s3.list_job_manifests(_s3_store())
+    except Exception as exc:  # noqa: BLE001
+        error = s3.as_store_error(exc)
+        print(f"[S3] history could not be loaded: {error.code} ({type(exc).__name__})")
+        return jsonify({"error": redact(str(error)), "code": error.code, "jobs": [], "total": 0}), (
+            s3.ERROR_STATUS.get(error.code, 503)
+        ), NO_STORE
+    entries = [_history_entry(m) for m in manifests]
+    stored_ids = {entry["job_id"] for entry in entries}
+    running = [
+        {
+            "job_id": j.job_id,
+            "video_uid": j.video_uid,
+            "source": j.display_name,
+            "status": "processing",
+            "error": None,
+            "created_at": j.created_at.isoformat(),
+            "completed_at": "",
+            "has_summary": False,
+            "summary_languages": ["en"],
+            "has_audio": False,
+            "highlights": [],
+            "has_highlight_video": False,
+            "output_languages": [],
+        }
+        for j in list(jobs.values())
+        if j.status == "processing" and j.job_id not in stored_ids
+    ]
+    listed = running + entries
+    return jsonify({"jobs": listed, "total": len(listed)}), 200, NO_STORE
+
+
+@app.route("/api/job/<job_id>", methods=["DELETE"])
+def delete_job_route(job_id):
+    """Delete one job and every file of it from S3. Irreversible. A job that is still running cannot be deleted."""
+    if not _valid_job_id(job_id):
+        return jsonify({"error": "Job not found"}), 404
+    job = jobs.get(job_id)
+    if job and job.status == "processing":
+        return jsonify({"error": "This job is still running. Delete it when it has finished."}), 409
+    try:
+        removed = s3.delete_job(_s3_store(), job_id)
+    except Exception as exc:  # noqa: BLE001
+        error = s3.as_store_error(exc)
+        print(f"[S3] job {job_id} not deleted: {error.code} ({type(exc).__name__})")
+        return jsonify({"error": redact(str(error)), "code": error.code}), s3.ERROR_STATUS.get(error.code, 503)
+    if removed == 0:
+        return jsonify({"error": "Job not found"}), 404
+    jobs.pop(job_id, None)
+    return jsonify({"ok": True, "deleted_files": removed}), 200
+
 
 @app.route("/download/summary/<job_id>")
 @app.route("/download/summary/<job_id>/<lang_code>")
 def download_summary(job_id, lang_code: str = "en"):
-    """Download summary text file (English or translated)."""
-    try:
-        code = (lang_code or "en").strip().lower()
-        if code not in LOCALES:
-            return "Invalid language", 400
-        job_dir = _job_output_dir(job_id)
-        if code == "en":
-            file_path = job_dir / "summary.txt"
-            download_name = "summary.txt"
-        else:
-            file_path = job_dir / f"summary_{code}.txt"
-            download_name = f"summary_{code}.txt"
-            if not file_path.is_file():
-                text = summary_text_for_language(job_dir, code)
-                if text:
-                    file_path.write_text(text, encoding="utf-8")
+    """Summary text (English or translated). Redirects to a fresh one-hour S3 link."""
+    code = (lang_code or "en").strip().lower()
+    if code not in LOCALES:
+        return "Invalid language", 400
+    rel = "summary.txt" if code == "en" else f"summary_{code}.txt"
+    return _file_redirect(job_id, rel, attachment=True)
 
-        if file_path.is_file():
-            return send_file(
-                file_path,
-                as_attachment=True,
-                download_name=download_name,
-                mimetype="text/plain",
-            )
-        return "File not found", 404
-    except Exception as e:
-        print(f"[ERROR] Download summary failed: {safe_exc(e)}")
-        return "File not found", 404
 
 @app.route("/download/subtitles/<job_id>")
 def download_subtitles(job_id):
-    """Download SRT subtitle file."""
-    try:
-        job = jobs.get(job_id)
-        if job:
-            file_path = job.job_output_dir / "summary.srt"
-        else:
-            file_path = OUTPUT_DIR / job_id / "summary.srt"
+    """SRT subtitle file. Redirects to a fresh one-hour S3 link."""
+    return _file_redirect(job_id, "summary.srt", attachment=True)
 
-        if file_path.exists():
-            return send_file(
-                file_path,
-                as_attachment=True,
-                download_name="summary.srt",
-                mimetype="text/plain"
-            )
-        return "File not found", 404
-    except Exception as e:
-        print(f"[ERROR] Download subtitles failed: {safe_exc(e)}")
-        return "File not found", 404
 
 @app.route("/download/audio/<job_id>")
 def download_audio(job_id):
@@ -1004,62 +981,54 @@ def download_audio(job_id):
     the video have the same length and timing. If that audio is missing, the response says so; the summary audio is
     never returned in its place. `?source=summary` returns the full summary narration instead.
     """
-    if not _valid_job_id(job_id):
-        return jsonify({"error": "Job not found"}), 404
-    try:
-        job_dir = _job_output_dir(job_id)
-        if request.args.get("source") != "summary":
-            requested = read_highlight_status(job_dir).get("requested_languages") or []
-            if "en" in requested:
-                track = ensure_narration_track(job_dir / "highlights" / "en")
-                if track is not None:
-                    return send_file(
-                        track,
-                        as_attachment=True,
-                        download_name="highlight_narration_en.mp3",
-                        mimetype="audio/mpeg",
-                    )
-                return jsonify({"error": "The highlight audio is not available for this job."}), 404
-        file_path = job_dir / "audio_explanation.mp3"
-        if file_path.exists():
-            return send_file(
-                file_path,
-                as_attachment=True,
-                download_name="audio_explanation.mp3",
-                mimetype="audio/mpeg"
-            )
-        return "File not found", 404
-    except Exception as e:
-        print(f"[ERROR] Download audio failed: {safe_exc(e)}")
-        return "File not found", 404
+    manifest, error = _load_manifest(job_id)
+    if error is not None:
+        return error
+    if request.args.get("source") != "summary":
+        requested = (manifest.get("results") or {}).get("requested_languages") or []
+        if "en" in requested:
+            rel = f"highlights/en/{HIGHLIGHT_NARRATION_FILE}"
+            if rel in (manifest.get("files") or {}):
+                return _file_redirect(job_id, rel, attachment=True)
+            return jsonify({"error": "The highlight audio is not available for this job."}), 404
+    return _file_redirect(job_id, "audio_explanation.mp3", attachment=True)
 
 
-def _job_output_dir(job_id: str) -> Path:
-    job = jobs.get(job_id)
-    if job:
-        return job.job_output_dir
-    return OUTPUT_DIR / job_id
+def _file_digests(folder: Path) -> dict[str, str]:
+    """SHA-256 of every file under folder, keyed by relative path. Used to upload only what a retry changed."""
+    digests: dict[str, str] = {}
+    for path in folder.rglob("*"):
+        if path.is_file():
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digests[path.relative_to(folder).as_posix()] = digest.hexdigest()
+    return digests
 
 
 @app.route("/api/highlight/retry/<job_id>", methods=["POST"])
 def retry_highlight(job_id):
-    """Re-run failed highlight languages (reuses cache + shared visuals)."""
+    """Re-run failed highlight languages on this machine. The job's files come from S3, and the result is saved back."""
     try:
         if not _valid_job_id(job_id):
             return jsonify({"error": "Job not found"}), 404
         from src.pipeline_runtime import RUNTIME_RUNPOD, load_pipeline_runtime
 
         if load_pipeline_runtime() == RUNTIME_RUNPOD:
-            # The retry path renders on this machine and never uploads to S3. Refuse rather than do local
-            # processing in RunPod mode. A serverless retry needs its own implementation and tests.
+            # Retries render on this machine. A serverless retry needs its own implementation and tests.
             return jsonify({
                 "error": "Retrying a highlight is not available in the current processing mode yet. "
                          "Switch to Local mode on the GPU selection page to retry on this machine.",
                 "code": "retry_unavailable_runpod",
             }), 409
-        job_dir = _job_output_dir(job_id)
-        if not job_dir.is_dir():
+
+        store = _s3_store()
+        manifest = s3.load_job_manifest(store, job_id)
+        if manifest is None:
             return jsonify({"error": "Job not found"}), 404
+        if manifest.get("status") != "completed":
+            return jsonify({"error": "Only a completed job can be retried."}), 409
 
         body = request.get_json(silent=True) or {}
         langs = body.get("languages")
@@ -1070,14 +1039,43 @@ def retry_highlight(job_id):
         model = body.get("model")
         compression = body.get("compression")
 
-        retry_highlight_languages(
-            job_dir,
-            lang_list,
-            model=model,
-            compression=compression,
-        )
-        status = list_highlight_language_status(job_dir)
-        downloads = list_highlight_downloads(job_dir)
+        work_dir = Path(tempfile.mkdtemp(prefix=f"retry_{job_id}_"))
+        try:
+            s3.download_job_files(store, manifest, work_dir)
+            before = _file_digests(work_dir)
+            retry_highlight_languages(
+                work_dir,
+                lang_list,
+                model=model,
+                compression=compression,
+            )
+            results = _results_payload(work_dir, (manifest.get("results") or {}).get("transcript_length", 0))
+            _prepare_downloadable_files(work_dir, results)
+            after = _file_digests(work_dir)
+            # Files the retry did not change are already in S3 with the same content, so they are not sent again.
+            unchanged = {
+                rel: manifest["files"][rel]
+                for rel, digest in before.items()
+                if after.get(rel) == digest and rel in manifest["files"]
+            }
+            s3.publish_job(
+                store,
+                work_dir,
+                job_id=job_id,
+                video_uid=manifest["video_uid"],
+                source_name=manifest.get("source") or job_id,
+                created_at=manifest.get("created_at", ""),
+                completed_at=manifest.get("completed_at", ""),
+                results=results,
+                known_files=unchanged,
+            )
+            status = list_highlight_language_status(work_dir)
+            downloads = list_highlight_downloads(work_dir)
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+        if job_id in jobs:
+            jobs[job_id].results = results
         return jsonify(
             {
                 "ok": True,
@@ -1086,6 +1084,8 @@ def retry_highlight(job_id):
                 "highlight_video": len(downloads) > 0,
             }
         ), 200
+    except s3.HighlightStoreError as exc:
+        return jsonify({"error": redact(str(exc)), "code": exc.code}), s3.ERROR_STATUS.get(exc.code, 503)
     except Exception as e:
         return jsonify({"error": redact(str(e))}), 500
 
@@ -1098,120 +1098,68 @@ def _valid_job_id(job_id: str) -> bool:
     return bool(JOB_ID_RE.match(job_id or ""))
 
 
-def _upload_failed_response(job_id: str, code: str):
-    """Refuse to serve a local copy whose S3 upload failed. The user sees why, not a stale file."""
-    print(f"[S3] highlight {job_id}/{code} not served: S3 upload failed")
-    message = "This highlight could not be saved to S3, so it is not available. Re-run the job to try again."
-    return message, 503, NO_STORE
+def _highlight_rel(code: str) -> str:
+    """Path of a highlight inside the job folder, the same path the pipeline writes it to."""
+    return f"highlights/{code}/highlight_{code}.mp4"
 
 
-def _highlight_link(job_id: str, code: str, attachment: bool) -> dict:
-    return s3.highlight_url(_job_output_dir(job_id), code, s3.highlight_store(), attachment=attachment)
-
-
-@app.route("/api/highlight-url/<job_id>/<lang_code>", methods=["GET"])
-def api_highlight_url(job_id, lang_code):
-    """Fresh one-hour S3 link for a stored highlight. Built on every call, never saved or cached.
-
-    404 with code 'not_in_s3' means the highlight exists only on local disk (local mode or a job from before S3).
-    """
-    code = (lang_code or "en").strip().lower()
-    if not _valid_job_id(job_id):
-        return jsonify({"error": "Job not found"}), 404, NO_STORE
-    if code not in LOCALES:
-        return jsonify({"error": "Invalid language"}), 400, NO_STORE
-    if not _job_output_dir(job_id).is_dir():
-        return jsonify({"error": "Job not found"}), 404, NO_STORE
-    attachment = request.args.get("attachment", "") in ("1", "true")
+def _file_redirect(job_id: str, rel: str, *, attachment: bool):
+    """Send the browser to a fresh one-hour S3 link for one file of a job. Nothing is served from this machine."""
+    manifest, error = _load_manifest(job_id)
+    if error is not None:
+        return error
     try:
-        payload = _highlight_link(job_id, code, attachment)
-    except s3.HighlightStoreError as exc:
-        print(f"[S3] highlight link for {job_id}/{code} not issued: {exc.code}")
-        return jsonify({"error": redact(str(exc)), "code": exc.code}), s3.ERROR_STATUS.get(exc.code, 500), NO_STORE
-    except Exception as exc:  # noqa: BLE001 — log the type only; messages can carry sensitive detail
-        print(f"[S3] highlight link for {job_id}/{code} failed: {type(exc).__name__}")
-        return jsonify({"error": "The highlight video is temporarily unavailable. Please try again.",
-                        "code": "s3_unavailable"}), 503, NO_STORE
-    print(f"[S3] highlight link for {job_id}/{code} issued")
-    return jsonify(payload), 200, NO_STORE
-
-
-def _redirect_to_stored_highlight(job_id: str, code: str, attachment: bool):
-    """Send the browser to a fresh S3 link. Nothing falls back to the local file when S3 is the source."""
-    try:
-        payload = _highlight_link(job_id, code, attachment)
-    except s3.HighlightStoreError as exc:
-        print(f"[S3] highlight redirect for {job_id}/{code} not issued: {exc.code}")
-        return redact(str(exc)), s3.ERROR_STATUS.get(exc.code, 500), NO_STORE
+        payload = s3.file_link(_s3_store(), manifest, rel, attachment=attachment)
     except Exception as exc:  # noqa: BLE001
-        print(f"[S3] highlight redirect for {job_id}/{code} failed: {type(exc).__name__}")
-        return "S3 is unavailable for this highlight.", 503, NO_STORE
+        error = s3.as_store_error(exc)
+        print(f"[S3] {job_id}/{rel} not issued: {error.code} ({type(exc).__name__})")
+        return redact(str(error)), s3.ERROR_STATUS.get(error.code, 503), NO_STORE
     response = redirect(payload["url"], code=302)
     response.headers["Cache-Control"] = "no-store"
     return response
 
 
+@app.route("/api/highlight-url/<job_id>/<lang_code>", methods=["GET"])
+def api_highlight_url(job_id, lang_code):
+    """Fresh one-hour S3 link for a highlight. Built on every call, never saved or cached.
+
+    404 with code 'not_in_s3' means this job has no highlight in that language.
+    """
+    code = (lang_code or "en").strip().lower()
+    if code not in LOCALES:
+        return jsonify({"error": "Invalid language"}), 400, NO_STORE
+    manifest, error = _load_manifest(job_id)
+    if error is not None:
+        return error[0], error[1], NO_STORE
+    attachment = request.args.get("attachment", "") in ("1", "true")
+    try:
+        payload = s3.file_link(_s3_store(), manifest, _highlight_rel(code), attachment=attachment)
+    except Exception as exc:  # noqa: BLE001 — log the type only; messages can carry sensitive detail
+        error = s3.as_store_error(exc)
+        print(f"[S3] highlight link for {job_id}/{code} not issued: {error.code} ({type(exc).__name__})")
+        return jsonify({"error": redact(str(error)), "code": error.code}), s3.ERROR_STATUS.get(error.code, 503), NO_STORE
+    print(f"[S3] highlight link for {job_id}/{code} issued")
+    return jsonify(payload), 200, NO_STORE
+
+
 @app.route("/stream/highlight/<job_id>")
 @app.route("/stream/highlight/<job_id>/<lang_code>")
 def stream_highlight(job_id, lang_code: str = "en"):
-    """Inline MP4 for browser <video> (supports Range seeking)."""
-    try:
-        if not _valid_job_id(job_id):
-            return "File not found", 404
-        code = (lang_code or "en").strip().lower()
-        if code not in LOCALES:
-            return "Invalid language", 400
-        job_dir = _job_output_dir(job_id)
-        if s3.upload_failed_for_lang(job_dir, code):
-            return _upload_failed_response(job_id, code)
-        if s3.has_stored_highlight(job_dir, code):
-            return _redirect_to_stored_highlight(job_id, code, attachment=False)
-        file_path = highlight_file_for_lang(job_dir, code)
-        if file_path.is_file():
-            return send_file(
-                file_path,
-                mimetype="video/mp4",
-                as_attachment=False,
-                download_name=file_path.name,
-                conditional=True,
-            )
-        return "File not found", 404
-    except ValueError:
+    """Inline MP4 for the browser <video>. Redirects to a fresh one-hour S3 link."""
+    code = (lang_code or "en").strip().lower()
+    if code not in LOCALES:
         return "Invalid language", 400
-    except Exception as e:
-        print(f"[ERROR] Stream highlight failed: {safe_exc(e)}")
-        return "File not found", 404
+    return _file_redirect(job_id, _highlight_rel(code), attachment=False)
 
 
 @app.route("/download/highlight/<job_id>")
 @app.route("/download/highlight/<job_id>/<lang_code>")
 def download_highlight(job_id, lang_code: str = "en"):
-    """Download highlight_<lang>.mp4 for a completed job."""
-    try:
-        if not _valid_job_id(job_id):
-            return "File not found", 404
-        code = (lang_code or "en").strip().lower()
-        if code not in LOCALES:
-            return "Invalid language", 400
-        job_dir = _job_output_dir(job_id)
-        if s3.upload_failed_for_lang(job_dir, code):
-            return _upload_failed_response(job_id, code)
-        if s3.has_stored_highlight(job_dir, code):
-            return _redirect_to_stored_highlight(job_id, code, attachment=True)
-        file_path = highlight_file_for_lang(job_dir, code)
-        if file_path.is_file():
-            return send_file(
-                file_path,
-                as_attachment=True,
-                download_name=file_path.name,
-                mimetype="video/mp4",
-            )
-        return "File not found", 404
-    except ValueError:
+    """Download highlight_<lang>.mp4. Redirects to a fresh one-hour S3 link."""
+    code = (lang_code or "en").strip().lower()
+    if code not in LOCALES:
         return "Invalid language", 400
-    except Exception as e:
-        print(f"[ERROR] Download highlight failed: {safe_exc(e)}")
-        return "File not found", 404
+    return _file_redirect(job_id, _highlight_rel(code), attachment=True)
 
 def log_runpod_ssh_health_on_startup() -> None:
     """Warn when RunPod GPU mode is on but SSH is not reachable."""
@@ -1254,6 +1202,7 @@ if __name__ == "__main__":
     print("Starting Video Summarization Web App...")
     log_ffmpeg_subtitles_status_on_startup()
     log_runpod_ssh_health_on_startup()
+    _warn_if_storage_unavailable()
     from src.endpoint_capacity import start_background_recovery, startup_check
 
     startup_check(print)  # prunes expired job leases; sets endpoint max workers to 0 when none remain

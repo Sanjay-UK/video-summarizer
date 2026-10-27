@@ -8,6 +8,8 @@ import os
 import sys
 import tempfile
 import unittest
+
+import fake_s3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -171,7 +173,7 @@ class RunpodHeavyPhaseTests(unittest.TestCase):
         patches = [
             mock.patch.object(app_module, "OUTPUT_DIR", self.out),
             mock.patch.object(app_module, "jobs", {}),
-            mock.patch.object(app_module, "job_history", []),
+            mock.patch.object(app_module, "_s3_store", return_value=fake_s3.new_store()),
             mock.patch.object(app_module, "resolve_runtime_for_job", return_value={
                 "mode": "hybrid_runpod", "location_label": "RunPod", "heavy_location": "runpod_serverless",
                 "light_location": "local"}),

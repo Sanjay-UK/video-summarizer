@@ -9,6 +9,10 @@ import os
 import sys
 import tempfile
 import unittest
+
+import fake_s3
+
+import fake_s3
 from pathlib import Path
 from unittest import mock
 
@@ -166,10 +170,11 @@ class JobAndApiTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.out = Path(tmp.name) / "output"
         self.out.mkdir()
+        self.store = fake_s3.new_store()
         patches = [
             mock.patch.object(self.app, "OUTPUT_DIR", self.out),
             mock.patch.object(self.app, "jobs", {}),
-            mock.patch.object(self.app, "job_history", []),
+            mock.patch.object(self.app, "_s3_store", return_value=self.store),
             mock.patch.object(self.app, "resolve_runtime_for_job",
                               return_value={"location_label": "this machine", "heavy_location": "local",
                                             "light_location": "local"}),
@@ -204,12 +209,12 @@ class JobAndApiTests(unittest.TestCase):
             getattr(self.executor, method, mock.Mock()).assert_not_called()
         self.assertNotIn("sabr", job.error.lower())
 
-    def test_failed_job_is_recorded_on_disk_with_code_and_no_summary(self):
+    def test_failed_job_is_recorded_in_storage_with_code_and_no_summary(self):
         job, _, _ = self._run_failed_download("1a2b3c4d")
-        metadata = json.loads((job.job_output_dir / "summary_metadata.json").read_text(encoding="utf-8"))
-        self.assertEqual(metadata["status"], "error")
-        self.assertEqual(metadata["error_code"], ye.YOUTUBE_AUTH_REQUIRED)
-        self.assertFalse((job.job_output_dir / "summary.txt").exists())
+        manifest = fake_s3.manifest(self.store, "1a2b3c4d")
+        self.assertEqual(manifest["status"], "error")
+        self.assertEqual(manifest["error_code"], ye.YOUTUBE_AUTH_REQUIRED)
+        self.assertNotIn("summary.txt", manifest["files"])
 
     def test_results_api_returns_422_with_code_for_user_actionable_failures(self):
         self._run_failed_download("2a2b3c4d")
@@ -228,11 +233,7 @@ class JobAndApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
 
     def test_partial_summary_cannot_make_a_failed_job_look_successful(self):
-        job_dir = self.out / "4a2b3c4d"
-        job_dir.mkdir()
-        (job_dir / "summary.txt").write_text("partial", encoding="utf-8")
-        (job_dir / "summary_metadata.json").write_text(
-            json.dumps({"status": "error", "error": "failed", "error_code": ye.YOUTUBE_PRIVATE}), encoding="utf-8")
+        fake_s3.publish_failed_job(self.store, "4a2b3c4d", "failed", ye.YOUTUBE_PRIVATE)
         response = self.app.app.test_client().get("/api/results/4a2b3c4d")
         self.assertEqual(response.status_code, 422)
         self.assertNotIn("summary", response.get_json())
@@ -241,18 +242,15 @@ class JobAndApiTests(unittest.TestCase):
         job_dir = self.out / "5a2b3c4d"
         job_dir.mkdir()
         (job_dir / "summary.txt").write_text("A summary.", encoding="utf-8")
-        (job_dir / "summary_metadata.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+        fake_s3.publish_local_job(self.app, self.store, job_dir, "5a2b3c4d")
         response = self.app.app.test_client().get("/api/results/5a2b3c4d")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["status"], "completed")
 
     def test_history_shows_the_failed_job_as_an_error(self):
-        job_dir = self.out / "6a2b3c4d"
-        job_dir.mkdir()
-        (job_dir / "summary_metadata.json").write_text(
-            json.dumps({"status": "error", "error": "x", "error_code": ye.YOUTUBE_AUTH_REQUIRED,
-                        "source": "youtube"}), encoding="utf-8")
-        entry = self.app.enrich_history_entry({"job_id": "6a2b3c4d"})
+        fake_s3.publish_failed_job(self.store, "6a2b3c4d", "x", ye.YOUTUBE_AUTH_REQUIRED)
+        listed = self.app.app.test_client().get("/api/history").get_json()["jobs"]
+        entry = next(j for j in listed if j["job_id"] == "6a2b3c4d")
         self.assertEqual(entry["status"], "error")
         self.assertFalse(entry["has_summary"])
 

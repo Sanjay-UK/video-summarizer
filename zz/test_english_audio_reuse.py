@@ -8,6 +8,8 @@ import os
 import sys
 import tempfile
 import unittest
+
+import fake_s3
 from pathlib import Path
 from unittest import mock
 
@@ -242,6 +244,17 @@ def _duration_seconds(path: Path) -> float:
 
 
 @unittest.skipUnless(_ffmpeg_available(), "FFmpeg is not available")
+class _Served:
+    """The bytes and status the browser ends up with, after any redirect has been followed."""
+
+    def __init__(self, status_code, data):
+        self.status_code = status_code
+        self.data = data
+
+    def get_json(self):
+        return json.loads(self.data.decode("utf-8"))
+
+
 class EnglishAudioDownloadTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -258,7 +271,8 @@ class EnglishAudioDownloadTests(unittest.TestCase):
         self.job_dir = Path(tmp.name) / "a1b2c3d4"
         self.job_dir.mkdir()
         (self.job_dir / "audio_explanation.mp3").write_bytes(b"SUMMARY-AUDIO-2-MINUTES")
-        patcher = mock.patch.object(self.app_module, "_job_output_dir", return_value=self.job_dir)
+        self.store = fake_s3.new_store()
+        patcher = mock.patch.object(self.app_module, "_s3_store", return_value=self.store)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.english = self.job_dir / "highlights" / "en"
@@ -269,9 +283,27 @@ class EnglishAudioDownloadTests(unittest.TestCase):
         (self.job_dir / "highlights" / "highlight_status.json").write_text(json.dumps(status), encoding="utf-8")
 
     def _get_audio(self, query=""):
+        """Publish the job folder to the fake bucket, then request the audio the way the browser does.
+
+        A redirect to a stored file is followed here, so the assertions check the bytes that would be served.
+        """
+        fake_s3.publish_local_job(self.app_module, self.store, self.job_dir, "a1b2c3d4")
         resp = self.client.get(f"/download/audio/a1b2c3d4{query}")
         self.addCleanup(resp.close)
-        return resp
+        if resp.status_code == 302:
+            return _Served(200, self.store.client.objects[fake_s3.key_from_link(resp.headers["Location"])])
+        return _Served(resp.status_code, resp.data)
+
+    def test_english_download_is_a_redirect_to_the_stored_narration(self):
+        """The download is a 302 to a fresh link for the job's own stored narration file, never a local file."""
+        self._set_requested(["en"])
+        _make_highlight_video(self.english / "highlight_en.mp4", seconds=3.0)
+        manifest = fake_s3.publish_local_job(self.app_module, self.store, self.job_dir, "a1b2c3d4")
+        resp = self.client.get("/download/audio/a1b2c3d4")
+        self.addCleanup(resp.close)
+        self.assertEqual(resp.status_code, 302)
+        expected = f"jobs/a1b2c3d4/{manifest['video_uid']}/highlights/en/{hp.HIGHLIGHT_NARRATION_FILE}"
+        self.assertEqual(fake_s3.key_from_link(resp.headers["Location"]), expected)
 
     def test_remote_english_highlight_without_narration_file_downloads_the_video_audio(self):
         """Reproduces the 0:00 player: the worker returns only highlight_en.mp4, and no narration file exists."""

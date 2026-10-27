@@ -177,7 +177,7 @@ class PipelinePathTests(unittest.TestCase):
 
     @unittest.skipIf(not (ROOT / "app.py").exists(), "app.py is not part of the worker image")
     def test_processing_failure_job_log_console_and_api_are_clean(self):
-        from tests.test_progress_fixes import FullRunTestBase, app_module
+        from test_progress_fixes import FullRunTestBase, app_module
 
         class Probe(FullRunTestBase):
             def runTest(self):
@@ -197,7 +197,7 @@ class PipelinePathTests(unittest.TestCase):
 
     @unittest.skipIf(not (ROOT / "app.py").exists(), "app.py is not part of the worker image")
     def test_highlight_failure_is_redacted_in_log_and_persisted_status(self):
-        from tests.test_progress_fixes import FullRunTestBase
+        from test_progress_fixes import FullRunTestBase
 
         class Probe(FullRunTestBase):
             def runTest(self):
@@ -285,17 +285,13 @@ class CallSiteTests(unittest.TestCase):
     def test_highlight_store_error_response_is_sanitised(self):
         import app as app_module
         from src import s3_video_store as s3
+        import fake_s3
 
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        out = Path(tmp.name) / "output"
-        (out / "0a1b2c3d").mkdir(parents=True)
+        store = fake_s3.new_store()
+        fake_s3.publish_failed_job(store, "0a1b2c3d", "stored")  # a job exists, so the request reaches the file link
         error = s3.HighlightStoreError("s3_access", f"S3 refused the request at {SIGNED} with {TOKEN}")
-        with mock.patch.object(app_module, "OUTPUT_DIR", out), \
-                mock.patch.object(s3, "has_stored_highlight", return_value=True), \
-                mock.patch.object(s3, "upload_failed_for_lang", return_value=False), \
-                mock.patch.object(s3, "highlight_url", side_effect=error), \
-                mock.patch.object(s3, "highlight_store", return_value=None):
+        with mock.patch.object(app_module, "_s3_store", return_value=store), \
+                mock.patch.object(s3, "file_link", side_effect=error):
             response = app_module.app.test_client().get("/stream/highlight/0a1b2c3d/en")
         self.assertEqual(response.status_code, 503)
         _assert_clean(self, response.get_data(as_text=True))

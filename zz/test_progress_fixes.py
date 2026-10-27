@@ -10,6 +10,8 @@ import sys
 import tempfile
 import threading
 import unittest
+
+import fake_s3
 from pathlib import Path
 from unittest import mock
 
@@ -54,11 +56,12 @@ class FullRunTestBase(unittest.TestCase):
         self.snapshots = []
         self.executor = mock.Mock()
         self.executor.run_heavy_phase.side_effect = self._heavy
+        self.store = fake_s3.new_store()
         self.highlight_behaviour = None  # set by tests: a callable or None
         patches = [
             mock.patch.object(app_module, "OUTPUT_DIR", self.out),
             mock.patch.object(app_module, "jobs", {}),
-            mock.patch.object(app_module, "job_history", []),
+            mock.patch.object(app_module, "_s3_store", return_value=self.store),
             mock.patch.object(app_module, "resolve_runtime_for_job", return_value=LOCAL_RUNTIME),
             mock.patch.object(app_module, "apply_runtime_side_effects", return_value={}),
             mock.patch.object(app_module, "restore_runtime_side_effects", return_value=None),
@@ -190,7 +193,7 @@ class FailureMessageTests(FullRunTestBase):
         self.executor.run_heavy_phase.side_effect = RuntimeError("boom")
         job, _ = self._run(highlight=False)
         self.assertIsNone(job.error_code)
-        meta = json.loads((job.job_output_dir / "summary_metadata.json").read_text(encoding="utf-8"))
+        meta = fake_s3.manifest(self.store, job.job_id)
         self.assertIsNone(meta["error_code"])
 
     def test_foreign_exception_code_attribute_is_not_persisted(self):
@@ -366,7 +369,7 @@ class FailedJobPayloadTests(FullRunTestBase):
         self.executor.run_heavy_phase.side_effect = RuntimeError(leaky)
         job, _ = self._run(highlight=False)
         results = app_module.app.test_client().get(f"/api/results/{job.job_id}")
-        meta = (job.job_output_dir / "summary_metadata.json").read_text(encoding="utf-8")
+        meta = json.dumps(fake_s3.manifest(self.store, job.job_id))
         for text in (json.dumps(job.to_dict()), results.get_data(as_text=True), meta):
             self.assertNotIn("SECRETSIG", text)
             self.assertNotIn("TOKEN123", text)
@@ -379,4 +382,6 @@ class FailedJobPayloadTests(FullRunTestBase):
         live = job.to_dict()["error"]
         results_body = self.app_client.get(f"/api/results/{job.job_id}").get_json()
         self.assertEqual(results_body["error"], live)
-        self.assertEqual(app_module._failed_job_payload(job.job_output_dir)["error"], live)
+        history = self.app_client.get("/api/history").get_json()["jobs"]
+        entry = next(j for j in history if j["job_id"] == job.job_id)
+        self.assertEqual(entry["error"], live)

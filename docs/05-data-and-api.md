@@ -52,8 +52,8 @@ Written by `app.py` and the pipelines. Not every file exists for every job; the 
 | `summary_<lang>.txt` | When a summary is translated or downloaded | Text | `src/summary_translate.py:189`, `app.py:950-952` | Translated summary |
 | `runpod_job_metrics.json` | After a RunPod heavy job | JSON | `src/pipeline_executor.py:199-205` | `delayTime` and `executionTime` in milliseconds, plus `runpod_job_id` |
 | `heavy_done.json` | After a Jupyter/SSH pod run | JSON | Pod worker (`scripts/runpod_heavy_worker.py`) | Marker that the pod finished |
-| `s3_video.json` | When S3 is used for the source | JSON | `src/s3_video_store.py` (`write_record`), `src/pipeline_executor.py:250-256` | Bucket, key, status (`uploaded`, `deleted`, `retained_after_failure`, `delete_failed`), timestamps. Never a signed URL. |
-| `s3_highlights.json` | When S3 is used for highlights | JSON | `src/pipeline_executor.py:254-270` | Per-language S3 keys |
+| `manifest.json` (in S3, not on disk) | Every finished or failed job | JSON | `src/s3_video_store.py` (`publish_job`, `publish_failure`) | Job ID, video ID, status, results, and each file's key and size. Written last. Never a signed URL. |
+| `s3_video.json`, `s3_highlights.json` | Old local records, no longer written | JSON | none | Left over from the earlier design; ignored. |
 | `highlights/highlight_status.json` | When highlights are requested | JSON | `src/highlight_jobs.py:41-55`, `src/highlight_pipeline.py` | Per-language status (section 6.4) |
 | `highlights/highlight_scenes.json` | When highlights are built | JSON | `src/highlight_pipeline.py:131` | Scene list (topics) |
 | `highlights/visual_manifest.json` | When highlights are built | JSON | `src/visual_extractor.py:327-350` | Per-scene visual mode and scores |
@@ -232,7 +232,7 @@ Example response (illustrative):
 
 ### GET `/api/history` — list past jobs
 - **Function:** `history` (`app.py:926`).
-- **Output:** `200` with `{"jobs": [...newest first...], "total": <n>}` (`app.py:929-932`). Each entry is enriched with highlight, S3 and summary-language information (`app.py:86-117`).
+- **Output:** `200` with `{"jobs": [...newest first...], "total": <n>}` (`app.py:929-932`). Each entry is built from the job's manifest in S3 (`app.py`, `_history_entry`). Jobs still running on this machine are listed as `processing`.
 
 ### POST `/api/highlight/retry/<job_id>` — retry failed highlight languages
 - **Function:** `retry_highlight` (`app.py:1018`).
@@ -245,12 +245,12 @@ Example response (illustrative):
 - **Function:** `api_highlight_url` (`app.py:1086`).
 - **Query:** `attachment=1` for a download link (`app.py:1098`).
 - **Output:** `200` JSON with a short-lived URL (`app.py:1108`). `400` for an invalid language, `404` for an invalid job ID or folder.
-  `503` with `s3_unavailable` if S3 fails. All responses have `Cache-Control: no-store`.
+  `503` with `s3_unavailable` if S3 fails. Its listing is cached for 30 seconds. All responses have `Cache-Control: no-store`.
 - **Lifetime:** one hour for S3 links (`src/s3_video_store.py:31`, `HIGHLIGHT_URL_EXPIRES`).
 
 ### GET `/stream/highlight/<job_id>` and `/stream/highlight/<job_id>/<lang_code>` — play a highlight
 - **Function:** `stream_highlight` (`app.py:1128`). Supports HTTP range requests (`app.py:1148`).
-- **Output:** the MP4 inline for local files, or `302` to S3 (`app.py:1111-1140`). `404` for an invalid job ID or missing file, `503` if the S3 upload failed.
+- **Output:** `302` to a fresh one-hour S3 link for the file (`app.py`, `_file_redirect`). `404` for an invalid job ID or a file the job does not have. The local folder is never served.
 
 ### GET `/download/highlight/<job_id>` and `/download/highlight/<job_id>/<lang_code>` — download a highlight
 - **Function:** `download_highlight` (`app.py:1160`). Same logic as streaming, as an attachment (`app.py:1169-1180`).

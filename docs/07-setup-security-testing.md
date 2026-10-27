@@ -112,12 +112,11 @@ Names, purpose and default only. **No values are shown.** Keep real values in `.
 | `HIGHLIGHT_DISABLE_GOOGLE` | Trips the Google breaker at start | Off (`src/highlight_pipeline.py:362`) |
 | `HIGHLIGHT_BLOCK_LIVE_GOOGLE`, `HIGHLIGHT_LIVE_GOOGLE` | Test guards for live Google calls | Empty (`src/translators/google_guard.py:7-12`) |
 
-### S3 (optional)
+### S3 (required)
 
 | Name | Purpose | Default |
 |---|---|---|
-| `VIDEO_S3_ENABLED` | Turns on S3 source upload | Off (`src/s3_video_store.py:70-78`) |
-| `VIDEO_S3_WORKER_URL_SUPPORT` | Also needed: lets the worker download with a signed link | Off (`src/s3_video_store.py:70-78`) |
+| `VIDEO_S3_WORKER_URL_SUPPORT` | Only for RunPod highlights: lets the worker download the source with a signed link | Off (`src/s3_video_store.py`, `worker_url_support`) |
 | `VIDEO_S3_BUCKET` | Bucket name | A hard-coded default exists (`src/s3_video_store.py:27`), not reproduced here |
 | `VIDEO_S3_REGION` | Region | `ap-south-1` (`src/s3_video_store.py:91`) |
 | `VIDEO_S3_PROFILE` | Named AWS profile | Fixed default name (`src/s3_video_store.py:29`) |

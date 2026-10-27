@@ -24,6 +24,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import fake_s3_client  # noqa: E402 — tests/ is on sys.path under CI's discover
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("RUNPOD_API_KEY", "")
@@ -149,10 +151,12 @@ async def fake_synthesize(text, output_path, *, voice):
 
 
 def _start_environment(stack: contextlib.ExitStack, output_dir: Path, jobs: dict, whisper_cls):
+    """Returns the fake S3 store the run writes to."""
+    store = fake_s3_client.new_store()
     """Route process_video into a temp output folder and swap only the external services."""
     stack.enter_context(mock.patch.object(app_module, "OUTPUT_DIR", output_dir))
     stack.enter_context(mock.patch.object(app_module, "jobs", jobs))
-    stack.enter_context(mock.patch.object(app_module, "job_history", []))
+    stack.enter_context(mock.patch.object(app_module, "_s3_store", return_value=store))
     stack.enter_context(mock.patch.object(app_module, "resolve_runtime_for_job", return_value=LOCAL_RUNTIME))
     stack.enter_context(mock.patch.object(app_module, "apply_runtime_side_effects", return_value={}))
     stack.enter_context(mock.patch.object(app_module, "restore_runtime_side_effects", return_value=None))
@@ -160,6 +164,7 @@ def _start_environment(stack: contextlib.ExitStack, output_dir: Path, jobs: dict
     stack.enter_context(mock.patch("ollama.Client", FakeOllamaClient))
     stack.enter_context(mock.patch("src.tts_generator.generate_audio_async", fake_generate_audio_async))
     stack.enter_context(mock.patch("src.highlight_tts._synthesize_async", fake_synthesize))
+    return store
 
 
 @unittest.skipUnless(FFMPEG, "needs an FFmpeg build with libass (subtitles filter) on this machine")
@@ -180,7 +185,7 @@ class CompletedJobIntegrationTests(unittest.TestCase):
         cls.jobs = {}
         stack = contextlib.ExitStack()
         cls.addClassCleanup(stack.close)
-        _start_environment(stack, cls.out, cls.jobs, FakeWhisperModel)
+        cls.store = _start_environment(stack, cls.out, cls.jobs, FakeWhisperModel)
 
         cls.job = app_module.JobProgress(cls.JOB_ID, str(cls.video))
         cls.jobs[cls.JOB_ID] = cls.job
@@ -209,9 +214,11 @@ class CompletedJobIntegrationTests(unittest.TestCase):
         self.assertIn("vinegar, sugar and salt", summary)
         linked = json.loads((self.job_dir / "summary_segments.json").read_text(encoding="utf-8"))
         self.assertTrue(linked, "summary_segments.json has no entries")
-        meta = json.loads((self.job_dir / "summary_metadata.json").read_text(encoding="utf-8"))
-        self.assertEqual(meta["status"], "completed")
-        self.assertEqual(meta["summary_length"], len(summary))
+        manifest = fake_s3_client.manifest(self.store, self.JOB_ID)
+        self.assertEqual(manifest["status"], "completed")
+        self.assertEqual(manifest["results"]["summary_length"], len(summary))
+        self.assertIn("summary.txt", manifest["files"])
+        self.assertIn("source.mp4", manifest["files"], "the source video is kept in S3 with the job")
 
     def test_narration_audio_is_playable_and_matches_the_subtitles(self):
         probe = _ffprobe(self.job_dir / "audio_explanation.mp3")
@@ -254,7 +261,7 @@ class FailedTranscriptionIntegrationTests(unittest.TestCase):
         cls.jobs = {}
         stack = contextlib.ExitStack()
         cls.addClassCleanup(stack.close)
-        _start_environment(stack, cls.out, cls.jobs, FailingWhisperModel)
+        cls.store = _start_environment(stack, cls.out, cls.jobs, FailingWhisperModel)
 
         cls.job = app_module.JobProgress(cls.JOB_ID, str(cls.video))
         cls.jobs[cls.JOB_ID] = cls.job
@@ -270,8 +277,9 @@ class FailedTranscriptionIntegrationTests(unittest.TestCase):
     def test_no_summary_or_highlight_is_written_after_the_failure(self):
         self.assertFalse((self.job_dir / "summary.txt").exists())
         self.assertFalse((self.job_dir / "highlights" / "en" / "highlight_en.mp4").exists())
-        meta = json.loads((self.job_dir / "summary_metadata.json").read_text(encoding="utf-8"))
-        self.assertEqual(meta["status"], "error")
+        manifest = fake_s3_client.manifest(self.store, self.JOB_ID)
+        self.assertEqual(manifest["status"], "error")
+        self.assertNotIn("summary.txt", manifest["files"])
 
 
 if __name__ == "__main__":

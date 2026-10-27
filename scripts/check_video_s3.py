@@ -9,7 +9,6 @@ Usage (from the project root):
 """
 
 from __future__ import annotations
-from src.log_safety import safe_exc
 
 import sys
 from pathlib import Path
@@ -18,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.gpu_selection import load_env_file  # noqa: E402
+from src.log_safety import safe_exc  # noqa: E402
 from src.s3_video_store import settings_from_env  # noqa: E402
 
 

@@ -196,12 +196,13 @@ comparisons for the harder ideas.
 - **States:** `not_deployed`, `unavailable`, `queued_max_zero`, `waiting_for_capacity`, `running`, `workers_idle_only`, `idle`
   (`src/serverless_live_status.py:19-25`). The words "queued" and "waiting" are labelled as inferences in the code.
 
-## F22. Optional S3 storage for the source video and highlights
+## F22. S3 storage for every job (required)
 
-- **What:** when enabled, the source video is uploaded to S3 and the GPU worker downloads it with a time-limited signed link.
-  Finished highlights are stored and played back through fresh one-hour links (`src/s3_video_store.py`).
-- **Off by default:** `VIDEO_S3_ENABLED` and `VIDEO_S3_WORKER_URL_SUPPORT` must both be on (`src/s3_video_store.py:70-78`).
-- **Details:** [05-data-and-api.md](05-data-and-api.md) and [07-setup-security-testing.md](07-setup-security-testing.md).
+- **What:** each job's files, including the source video, are stored in a private S3 bucket under `jobs/<job_id>/<video_uid>/`.
+  History, results, playback, and downloads read from S3 only, so any laptop with the same bucket shows the same jobs.
+  Jobs can be deleted from their page.
+- **Required:** if S3 is not set up, new jobs are refused with a message. There is no local-only mode for storage.
+- **Details:** [05-data-and-api.md](05-data-and-api.md), [06-logic-and-structure.md](06-logic-and-structure.md) §8.17, and [SETUP.md](../SETUP.md).
 
 ## F23. Capacity leases (scale-to-zero protection)
 
