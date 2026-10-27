@@ -66,7 +66,10 @@ def _libass_ffmpeg():
         binary = hf.resolve_ffmpeg_bin()
     except Exception:  # noqa: BLE001
         return None
-    proc = subprocess.run([binary, "-hide_banner", "-filters"], capture_output=True, text=True)
+    try:
+        proc = subprocess.run([binary, "-hide_banner", "-filters"], capture_output=True, text=True)
+    except OSError:  # no ffmpeg on this machine (e.g. a CI runner): the libass tests skip instead of failing at import
+        return None
     return binary if " subtitles " in proc.stdout else None
 
 
